@@ -1,0 +1,382 @@
+# .github/workflows/release.yml
+#
+# Multi-platform binary release for network-monitor.
+#
+# Triggers (all funnel through the `resolve` job):
+#   1. push of a tag matching `v*` (e.g. `v0.1.0`)        -> release that tag
+#   2. push to `main`                                     -> read Cargo.toml `version`, create `v<ver>` tag if missing,
+#                                                            then release. Skips if `v<ver>` already exists on origin.
+#   3. workflow_dispatch with an explicit `tag` input     -> release that tag (created if missing; an existing
+#                                                            release at the same commit gets its assets replaced)
+#
+# Outputs per target: {bin}-{target}.zip + {bin}-{target}.zip.sha256sum
+# Plus: {bin}_src.tar.gz + {bin}_src.tar.gz.sha256sum
+
+name: Release
+
+on:
+  push:
+    branches:
+      # Matches `main`, `public/main`, `private/main`. The repo's default branch in
+      # this project ships as `<remote>/main`, so the bare `main` pattern alone never
+      # fires. The double-star glob covers both single-segment and slash-prefixed names.
+      - 'main'
+      - '**/main'
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v0.1.0). Created if missing.'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  BIN_NAME: network-monitor
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  resolve:
+    name: Resolve release tag
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.name }}
+      commit: ${{ steps.tag.outputs.commit }}
+      should_release: ${{ steps.tag.outputs.should_release }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Remote tag lookups go through the REST API with the job token, so the
+      # checkout never has to keep git credentials on disk.
+      - name: Resolve tag from event
+        id: tag
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          REF_NAME: ${{ github.ref_name }}
+          DISPATCH_TAG: ${{ github.event.inputs.tag }}
+        run: |
+          set -euo pipefail
+
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            name="$DISPATCH_TAG"
+            if [[ "$name" != v* ]] || ! git check-ref-format "refs/tags/${name}"; then
+              echo "invalid release tag: ${name}" >&2
+              exit 1
+            fi
+            if git rev-parse --verify --quiet "refs/tags/${name}^{commit}" >/dev/null; then
+              commit=$(git rev-list -n 1 "refs/tags/${name}")
+              reason="workflow_dispatch existing tag"
+            else
+              commit="$GITHUB_SHA"
+              reason="workflow_dispatch new tag"
+            fi
+            should=true
+          elif [[ "$REF" == refs/tags/* ]]; then
+            name="$REF_NAME"
+            commit="$GITHUB_SHA"
+            should=true
+            reason="tag push"
+          else
+            version=$(grep -m1 -E '^version[[:space:]]*=' Cargo.toml | sed -E 's/version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/')
+            if [ -z "${version}" ]; then
+              echo "could not parse version from Cargo.toml" >&2
+              exit 1
+            fi
+            name="v${version}"
+            commit="$GITHUB_SHA"
+            if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${name}" --silent 2>/dev/null; then
+              should=false
+              reason="tag ${name} already exists on origin"
+            else
+              should=true
+              reason="new Cargo.toml version ${version}"
+            fi
+          fi
+
+          {
+            echo "name=${name}"
+            echo "commit=${commit}"
+            echo "should_release=${should}"
+          } >> "$GITHUB_OUTPUT"
+          echo "Resolved tag=${name} commit=${commit} should_release=${should} reason=${reason}"
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: resolve
+    if: needs.resolve.outputs.should_release == 'true'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            cross: false
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+            cross: false
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            cross: false
+          - target: aarch64-pc-windows-msvc
+            os: windows-latest
+            cross: true
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+            cross: false
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            cross: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.resolve.outputs.commit }}
+          persist-credentials: false
+
+      # The private repository tracks a machine-specific .cargo/config.toml
+      # (project vendor and local toolchain paths); runners build from the registry.
+      - name: Remove local cargo config
+        shell: bash
+        run: rm -f .cargo/config.toml
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+          components: clippy, rustfmt
+
+      # The pcap crate links libpcap: libpcap-dev on Linux, the SDK libpcap on
+      # macOS, and the Npcap SDK import libraries on Windows.
+      - name: Install libpcap (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libpcap-dev
+
+      # Pinned Npcap SDK with its own SHA-256 (import libraries only, no driver)
+      - name: Install Npcap SDK (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          version=1.17
+          sha256=ab7e1a6cb8d07427e0071ec11be380bd9d2bb19ae6ab3f5ede0698c301638258
+          dir="${RUNNER_TEMP}/npcap-sdk-${version}"
+          zip="${dir}.zip"
+          curl -fsSL --retry 3 --connect-timeout 10 --max-time 300 -o "${zip}" \
+            "https://npcap.com/dist/npcap-sdk-${version}.zip"
+          actual=$(sha256sum < "${zip}" | cut -d ' ' -f 1)
+          if [ "${actual}" != "${sha256}" ]; then
+            echo "::error::npcap-sdk-${version}.zip sha256 mismatch: expected ${sha256}, got ${actual}"
+            exit 1
+          fi
+          unzip -o -q "${zip}" -d "${dir}"
+          case "${TARGET}" in
+            aarch64-*) lib_dir="${dir}/Lib/ARM64" ;;
+            *)         lib_dir="${dir}/Lib/x64" ;;
+          esac
+          echo "LIBPCAP_LIBDIR=$(cygpath -w "${lib_dir}")" >> "${GITHUB_ENV}"
+
+      # No cargo cache in the release build: published binaries never start
+      # from a restored, possibly poisoned target directory.
+      - name: Format check
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        shell: bash
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        if: matrix.cross == false
+        shell: bash
+        run: cargo clippy --workspace --all-targets --locked --target ${{ matrix.target }} -- -D warnings
+
+      # Windows test binaries import wpcap.dll, which only the Npcap driver
+      # installer provides, so Windows compiles the tests without running them.
+      - name: Test
+        if: matrix.cross == false && runner.os != 'Windows'
+        shell: bash
+        run: cargo test --workspace --locked --target ${{ matrix.target }}
+
+      - name: Test (compile only)
+        if: matrix.cross == false && runner.os == 'Windows'
+        shell: bash
+        run: cargo test --workspace --locked --no-run --target ${{ matrix.target }}
+
+      - name: Build (release)
+        shell: bash
+        run: cargo build --release --locked --target ${{ matrix.target }} -p ${BIN_NAME}
+
+      - name: Smoke test (host targets only)
+        if: matrix.cross == false
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          case "$TARGET" in
+            *windows*) BIN_PATH="target/${TARGET}/release/${BIN_NAME}.exe" ;;
+            *)         BIN_PATH="target/${TARGET}/release/${BIN_NAME}" ;;
+          esac
+          ls -la "$BIN_PATH"
+
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          OUT="${BIN_NAME}-${TARGET}"
+          ZIP="${OUT}.zip"
+          ( cd "target/${TARGET}/release" && zip -9 "${GITHUB_WORKSPACE}/${ZIP}" "${BIN_NAME}" )
+          shasum -a 256 "${ZIP}" > "${ZIP}.sha256sum"
+          ls -la "${ZIP}" "${ZIP}.sha256sum"
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bin = "$env:BIN_NAME.exe"
+          $out = "$env:BIN_NAME-$env:TARGET"
+          $zip = "$out.zip"
+          $src = "target/$env:TARGET/release/$bin"
+          if (-not (Test-Path $src)) { throw "missing built binary: $src" }
+          Compress-Archive -Path $src -DestinationPath $zip -Force -CompressionLevel Optimal
+          $hash = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLower()
+          Set-Content -Encoding ascii -NoNewline -Path "$zip.sha256sum" -Value "$hash  $zip`n"
+          Get-Item $zip, "$zip.sha256sum"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ env.BIN_NAME }}-${{ matrix.target }}
+          path: |
+            ${{ env.BIN_NAME }}-${{ matrix.target }}.zip
+            ${{ env.BIN_NAME }}-${{ matrix.target }}.zip.sha256sum
+          if-no-files-found: error
+          retention-days: 7
+
+  source:
+    name: Source tarball
+    needs: resolve
+    if: needs.resolve.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.resolve.outputs.commit }}
+          persist-credentials: false
+
+      - name: Create source tarball
+        shell: bash
+        env:
+          TAG: ${{ needs.resolve.outputs.tag }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          PREFIX="${BIN_NAME}-${VERSION}"
+          OUT="${BIN_NAME}_src.tar.gz"
+          git archive --format=tar.gz --prefix="${PREFIX}/" -o "${OUT}" HEAD
+          sha256sum "${OUT}" > "${OUT}.sha256sum"
+          ls -la "${OUT}" "${OUT}.sha256sum"
+
+      - name: Upload source artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: source
+          path: |
+            ${{ env.BIN_NAME }}_src.tar.gz
+            ${{ env.BIN_NAME }}_src.tar.gz.sha256sum
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish GitHub Release
+    needs: [resolve, build, source]
+    if: needs.resolve.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List collected artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          ls -la artifacts
+          echo "---"
+          find artifacts -type f | sort
+
+      # Annotated tag through the git data API (tag object, then ref), so no
+      # checkout or persisted git credentials are needed in this job.
+      - name: Create tag if missing
+        if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/'))
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+          COMMIT: ${{ needs.resolve.outputs.commit }}
+        run: |
+          set -euo pipefail
+          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" --silent 2>/dev/null; then
+            echo "Tag ${TAG} already exists on origin. Skipping tag creation."
+          else
+            tag_sha=$(gh api "repos/${GITHUB_REPOSITORY}/git/tags" \
+              -f tag="${TAG}" -f message="Release ${TAG}" -f object="${COMMIT}" -f type=commit \
+              --jq .sha)
+            gh api "repos/${GITHUB_REPOSITORY}/git/refs" \
+              -f ref="refs/tags/${TAG}" -f sha="${tag_sha}" --silent
+            echo "Created annotated tag ${TAG} at ${COMMIT}."
+          fi
+
+      # An existing release is refreshed in place (like the former
+      # action-gh-release step), but only when its tag points at the built commit.
+      - name: Create or update GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+          COMMIT: ${{ needs.resolve.outputs.commit }}
+        run: |
+          set -euo pipefail
+          shopt -s failglob
+          assets=(artifacts/*.zip artifacts/*.sha256sum artifacts/*.tar.gz)
+          if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            tag_commit=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${TAG}" --jq .sha)
+            if [ "${tag_commit}" != "${COMMIT}" ]; then
+              echo "::error::release ${TAG} exists at ${tag_commit}, but this run built ${COMMIT}; refusing to replace its assets"
+              exit 1
+            fi
+            gh release upload "${TAG}" --repo "${GITHUB_REPOSITORY}" --clobber "${assets[@]}"
+            echo "Updated the assets of existing release ${TAG}."
+          else
+            gh release create "${TAG}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --verify-tag \
+              --title "${TAG}" \
+              --generate-notes \
+              "${assets[@]}"
+          fi

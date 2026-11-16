@@ -1,0 +1,53 @@
+# Cargo.toml (network-monitor-core)
+
+# ---------------------------------------------------------
+# package
+# ---------------------------------------------------------
+[package]
+name = "network-monitor-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Engine crate of network-monitor: packet capture, protocol decoders, flow tracking, display filters, process attribution, and the egress monitor core."
+readme = "../../README.md"
+documentation = "https://docs.rs/network-monitor-core"
+exclude = [
+  "/.cargo",
+  "/.cmd",
+  "/.docs",
+  "/.gitignore",
+  "/.vscode",
+  "/CLAUDE.md",
+  "/vendor",
+]
+
+# ---------------------------------------------------------
+# dependencies
+# ---------------------------------------------------------
+[dependencies]
+pcap.workspace = true
+crossbeam-channel.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+lru.workspace = true
+chrono.workspace = true
+nom.workspace = true
+md-5.workspace = true
+sha2.workspace = true
+rusqlite.workspace = true
+maxminddb.workspace = true
+
+# ---------------------------------------------------------
+# target
+# ---------------------------------------------------------
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

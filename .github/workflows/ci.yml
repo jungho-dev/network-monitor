@@ -1,52 +1,155 @@
+# .github/workflows/ci.yml
+#
+# Lightweight pre-release verification.
+# Runs cargo fmt check, clippy, and tests on host targets where
+# the release workflow does a native build, so regressions surface
+# before tagging a release.
+
 name: CI
 
 on:
   push:
-    branches: [ "main" ]
+    branches:
+      - 'main'
+      - '**/main'
   pull_request:
-    branches: [ "main" ]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUSTFLAGS: -D warnings
 
 jobs:
-  build-and-test:
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest]
+  check:
+    name: ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
+      # The private repository tracks a machine-specific .cargo/config.toml
+      # (project vendor and local toolchain paths); runners build from the registry.
+      - name: Remove local cargo config
+        shell: bash
+        run: rm -f .cargo/config.toml
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+          components: clippy, rustfmt
+
+      # The pcap crate links libpcap: libpcap-dev on Linux, the SDK libpcap on
+      # macOS, and the Npcap SDK import libraries on Windows.
       - name: Install libpcap (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libpcap-dev
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libpcap-dev
 
-      - name: Build
-        run: cargo build --verbose
+      # Pinned Npcap SDK with its own SHA-256 (import libraries only, no driver)
+      - name: Install Npcap SDK (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          version=1.17
+          sha256=ab7e1a6cb8d07427e0071ec11be380bd9d2bb19ae6ab3f5ede0698c301638258
+          dir="${RUNNER_TEMP}/npcap-sdk-${version}"
+          zip="${dir}.zip"
+          curl -fsSL --retry 3 --connect-timeout 10 --max-time 300 -o "${zip}" \
+            "https://npcap.com/dist/npcap-sdk-${version}.zip"
+          actual=$(sha256sum < "${zip}" | cut -d ' ' -f 1)
+          if [ "${actual}" != "${sha256}" ]; then
+            echo "::error::npcap-sdk-${version}.zip sha256 mismatch: expected ${sha256}, got ${actual}"
+            exit 1
+          fi
+          unzip -o -q "${zip}" -d "${dir}"
+          case "${TARGET}" in
+            aarch64-*) lib_dir="${dir}/Lib/ARM64" ;;
+            *)         lib_dir="${dir}/Lib/x64" ;;
+          esac
+          echo "LIBPCAP_LIBDIR=$(cygpath -w "${lib_dir}")" >> "${GITHUB_ENV}"
 
-      - name: Run tests
-        run: cargo test --verbose
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: ${{ matrix.target }}
+          shared-key: ci
 
-      - name: Build release
-        run: cargo build --release
-
-  clippy:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install libpcap
-        run: sudo apt-get update && sudo apt-get install -y libpcap-dev
+      - name: Format check
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo fmt --all -- --check
 
       - name: Clippy
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked --target ${{ matrix.target }} -- -D warnings
 
-  fmt:
+      - name: Build
+        run: cargo build --workspace --locked --target ${{ matrix.target }}
+
+      # Windows test binaries import wpcap.dll, which only the Npcap driver
+      # installer provides, so Windows compiles the tests without running them.
+      - name: Test
+        if: runner.os != 'Windows'
+        run: cargo test --workspace --locked --target ${{ matrix.target }}
+
+      - name: Test (compile only)
+        if: runner.os == 'Windows'
+        run: cargo test --workspace --locked --no-run --target ${{ matrix.target }}
+
+  # Cargo.toml rust-version gate
+  msrv:
+    name: MSRV 1.88
     runs-on: ubuntu-latest
+    env:
+      RUSTUP_TOOLCHAIN: '1.88.0'
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - name: Check formatting
-        run: cargo fmt -- --check
+      # The private repository tracks a machine-specific .cargo/config.toml
+      # (project vendor and local toolchain paths); runners build from the registry.
+      - name: Remove local cargo config
+        shell: bash
+        run: rm -f .cargo/config.toml
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: '1.88.0'
+
+      - name: Install libpcap
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libpcap-dev
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: msrv
+          shared-key: ci
+
+      - name: Check
+        run: cargo check --workspace --locked --all-targets

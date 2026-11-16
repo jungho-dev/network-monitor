@@ -1,0 +1,30 @@
+# config.example.toml
+#
+# Optional user configuration for network-monitor.
+# Copy this file to ~/.config/network-monitor/config.toml
+# (Windows: %USERPROFILE%\.config\network-monitor\config.toml).
+# That one folder holds every per-user file of network-monitor: this
+# config.toml, the daemon state (socket, database, pid file, monitor.log),
+# and saved capture logs.
+# Every key is optional: a missing key keeps the default shown here.
+# Command-line options take precedence over this file.
+# A file that fails to parse is ignored with a message on stderr.
+
+[capture]
+# Interface used when -i is omitted. Unset (the default) auto-selects the
+# active interface: up, running, connected, non-loopback, with a real IPv4 address.
+# Run `network-monitor list-interfaces` to see the names.
+# default_interface = "en0"
+
+[display]
+# Accepted but not applied yet: the TUI always uses its dark palette.
+color_scheme = "dark"
+
+# Saved display filters, one `name = "filter"` entry per line (default: none).
+# Recall one in the TUI filter bar (press /) as :name, for example :https.
+# The grammar is the display-filter language described in the README.
+[filters]
+https = "tcp.port == 443"
+dns = "udp.port == 53"
+web = "tls.sni contains example.com"
+no-dns = "(tcp || udp) && not dns"
