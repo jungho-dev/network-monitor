@@ -34,7 +34,7 @@
     - `network-monitor` (repository root): the binary package (`network-monitor`). CLI dispatch (clap), the capture pipeline wiring, and the two ratatui frontends (capture TUI, inspector). Its `[workspace]` table makes the root the workspace root.
     - `network-monitor-core` (`crates/network-monitor-core`, the only other workspace member): library (`network_monitor_core`). Capture, decoders, flow tracking, filters, process attribution, name/GeoIP/identity enrichment, the SQLite store, the alert engine, the monitor daemon, and Unix-socket IPC.
     - The root `Cargo.toml` keeps the shared `[workspace.package]` and `[workspace.dependencies]` tables, so the core crate inherits its version and dependency versions; the binary depends on the core crate by path plus version for crates.io.
-    - Edition 2024, `rust-version` 1.88 (the code uses let chains), version 0.1.1, Apache-2.0; both crates publish the root `README.md` as their crates.io readme.
+    - Edition 2024, `rust-version` 1.88 (the code uses let chains), version 0.1.2, Apache-2.0; both crates publish the root `README.md` as their crates.io readme.
 2. **Platform gating**
     - In the core crate, `inspector`, `ipc`, and `monitor` are `#[cfg(unix)]`; `libc` is a Unix-only dependency in both crates.
     - In the binary, `inspect` and the `monitor` and `inspect` command bodies are `#[cfg(unix)]`; on other targets those commands return an error.

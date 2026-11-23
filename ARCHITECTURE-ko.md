@@ -34,7 +34,7 @@
     - `network-monitor`(저장소 루트): 바이너리 패키지(`network-monitor`). CLI dispatch(clap), 캡처 파이프라인 연결, 두 ratatui frontend(캡처 TUI, inspector). 이 패키지의 `[workspace]` 표가 루트를 워크스페이스 루트로 만든다.
     - `network-monitor-core`(`crates/network-monitor-core`, 유일한 다른 워크스페이스 멤버): 라이브러리(`network_monitor_core`). 캡처, 디코더, flow 추적, 필터, 프로세스 귀속, 이름/GeoIP/identity 보강, SQLite store, 경보 엔진, 모니터 데몬, Unix 소켓 IPC
     - 루트 `Cargo.toml`이 공용 `[workspace.package]`와 `[workspace.dependencies]` 표를 유지하므로 core crate가 버전과 의존성 버전을 상속한다. 바이너리는 core crate에 경로와 crates.io용 버전을 함께 지정해 의존한다.
-    - Edition 2024, `rust-version` 1.88(코드가 let chain을 쓴다), 버전 0.1.1, Apache-2.0이며 두 crate 모두 루트 `README.md`를 crates.io readme로 게시한다.
+    - Edition 2024, `rust-version` 1.88(코드가 let chain을 쓴다), 버전 0.1.2, Apache-2.0이며 두 crate 모두 루트 `README.md`를 crates.io readme로 게시한다.
 2. **플랫폼 gate**
     - core crate에서 `inspector`, `ipc`, `monitor`는 `#[cfg(unix)]`이며, `libc`는 두 crate 모두에서 Unix 전용 의존성이다.
     - 바이너리에서 `inspect`와 `monitor`, `inspect` 명령 본문은 `#[cfg(unix)]`이며, 다른 타깃에서는 그 명령이 오류를 반환한다.
