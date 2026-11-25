@@ -53,10 +53,13 @@ fn inspect_cmd(state_dir: Option<PathBuf>, socket: Option<PathBuf>, json: bool) 
         Some(sock) => sock,
         None => network_monitor_core::monitor::paths::resolve(state_dir)?.socket,
     };
+    let sock = std::path::absolute(&sock).unwrap_or(sock);
     if json {
-        inspect_json(&sock)
-    } else {
-        inspect::run_inspector(&sock)
+        return inspect_json(&sock);
+    }
+    match inspect::run_inspector(&sock)? {
+        inspect::state::InspectExit::Quit => Ok(()),
+        inspect::state::InspectExit::Restart => inspect::restart_daemon_and_inspector(&sock),
     }
 }
 #[cfg(unix)]
@@ -183,6 +186,7 @@ fn monitor_cmd(action: MonitorAction) -> Result<()> {
             println!("monitor stopping");
             Ok(())
         }
+        MonitorAction::Preflight => core::permissions::check_capture_permissions(),
     }
 }
 #[cfg(not(unix))]
@@ -359,6 +363,7 @@ fn json_output_loop(
 }
 // 99. main --------------------------------------------------------------------
 fn main() -> Result<()> {
+    network_monitor_core::build_info::init();
     let cli = Cli::parse();
     let config = core::config::Config::load();
 

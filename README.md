@@ -241,6 +241,7 @@ sudo network-monitor monitor run -i en0 \
     - `--no-notify`: disable desktop notifications and log only.
 7. **`monitor status`** and **`monitor stop`** (Unix only)
     - `monitor status [--state-dir <dir>] [--json]`: baseline state, pid, interface, uptime, and process, destination, and alert counts.
+    - The status also carries `build_id` (size and modification time of the daemon's exe at startup), `exe_path` (that exe's path), and `run_args` (the daemon's own arguments); `inspect` compares `build_id` with the file now at `exe_path`, and a daemon from an older build without these fields is never flagged.
     - `monitor stop [--state-dir <dir>]`: asks the running daemon to shut down cleanly.
 8. **`inspect`** (Unix only)
     - `--state-dir <dir>`: state directory used to find the daemon socket.
@@ -355,6 +356,8 @@ google
     - `r`: refresh status and connections.
     - `Shift` with an up or down arrow: move the focused card; `l`: reset the current view's layout; `L`: switch the display language.
     - `?`: help; `q`, `Esc`, or `Ctrl-C`: quit.
+    - `!`: force restart, only while the daemon's own exe was replaced by another build on disk (checked every 2 seconds): stops the daemon, starts it again from that path with its own `monitor run` arguments plus `--daemonize`, and reruns `inspect`. It first checks capture privilege (of this `inspect` and of the new exe, by running it as a hidden `monitor preflight` command), write access to the state directory, absolute paths in the daemon's arguments, and the exe's owner; a failed check only shows an error toast and leaves the daemon running.
+    - While the daemon's exe on disk is another build, the app bar shows `● Build mismatch` and a warn-colored `[!] Force restart` chip leads the footer; clicking it does what `!` does.
 
 ---
 

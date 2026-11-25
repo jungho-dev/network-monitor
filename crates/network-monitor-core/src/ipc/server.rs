@@ -164,6 +164,9 @@ fn handle_query(ctx: &ServerCtx, req: Request) -> Response {
                 alerts,
                 schema_version: crate::store::schema::SCHEMA_VERSION,
                 version: env!("CARGO_PKG_VERSION").to_string(),
+                build_id: crate::build_info::BUILD_ID.clone(),
+                run_args: crate::build_info::launch_args(),
+                exe_path: crate::build_info::exe_path_text(),
             })
         }
         Request::LiveConnections => Response::Connections(

@@ -83,6 +83,7 @@ define_messages! {
     BarDisconnected => ("Disconnected", "연결 끊김"),
     BarLiveConns => ("live", "실시간 연결"),
     BarAlerts => ("alerts", "경보"),
+    BarBuildMismatch => ("Build mismatch", "빌드 불일치"),
 
     // footer chips
     ChipPause => ("Pause", "일시정지"),
@@ -96,6 +97,7 @@ define_messages! {
     ChipLanguage => ("EN", "KO"),
     ChipHelp => ("Help", "도움말"),
     ChipQuit => ("Quit", "종료"),
+    ChipForceRestart => ("Force restart", "강제 재시작"),
 
     // footer hints (first word is the key)
     HintRelease => ("Release to place", "놓아서 위치 확정"),
@@ -153,6 +155,7 @@ define_messages! {
     HelpCloseOverlay => ("Close view / cancel card move", "보기 닫기 / 카드 이동 취소"),
     HelpSwitchTab => ("Switch tab", "탭 전환"),
     HelpRefresh => ("Refresh from the daemon", "데몬에서 다시 불러오기"),
+    HelpForceRestart => ("Build mismatch: restart the daemon and inspector on the latest exe", "빌드 불일치 시 데몬·인스펙터를 최신 exe 로 강제 재시작"),
     HelpSearchRows => ("Search live connections", "실시간 연결 검색"),
     HelpToggleDetail => ("Focus table / detail card", "표 / 상세 카드 포커스"),
     HelpClickCard => ("Focus card (thick border), select row", "카드 포커스(굵은 테두리), 행 선택"),
@@ -179,6 +182,14 @@ define_messages! {
     ToastNoPackets => ("No packets to save", "저장할 패킷 없음"),
     ToastSaveStarted => ("Saving log", "로그 저장 중"),
     ToastRefreshRequested => ("Refresh requested", "새로고침 요청"),
+    ToastRestartNeedsPrivilege => ("Restart needs capture privilege: rerun inspect with sudo or setcap", "재시작에 캡처 권한 필요: sudo 또는 setcap 후 inspect 를 다시 실행"),
+    ToastRestartNeedsStateAccess => ("Restart needs write access to the daemon state folder: rerun inspect as the daemon's user", "재시작에 데몬 상태 폴더 쓰기 권한 필요: 데몬 실행 사용자로 inspect 를 다시 실행"),
+    ToastRestartRelativePath => ("Daemon was started with a relative path: restart it by hand", "데몬이 상대 경로로 실행됨: 수동으로 재시작"),
+    ToastRestartExeOwner => ("Daemon exe is owned by another user: restart it by hand", "데몬 exe 소유자가 다름: 수동으로 재시작"),
+    ToastRestartNotMonitorRun => ("Daemon was not started with monitor run: restart it by hand", "데몬이 monitor run 으로 실행되지 않음: 수동으로 재시작"),
+    ToastRestartNewExePrivilege => ("New build lacks capture privilege: run setcap on it again, then press !", "새 빌드에 캡처 권한 없음: setcap 을 다시 한 뒤 ! 를 누름"),
+    ToastRestartPreflightUnknown => ("New exe could not check its capture privilege: restart the daemon by hand", "새 exe 가 캡처 권한을 확인하지 못함: 데몬을 수동으로 재시작"),
+    ToastRestartExeName => ("Daemon exe name differs from inspect: restart it by hand", "데몬 exe 이름이 inspect 와 다름: 수동으로 재시작"),
 
     // panes and titles
     TitlePackets => ("Packets", "패킷"),
@@ -495,6 +506,7 @@ pub const INSPECT_HELP: &[HelpRow] = &[
     HelpRow::Section(Msg::HelpSectionKeyboard),
     HelpRow::Key("q  Esc  Ctrl+C", Msg::HelpQuit),
     HelpRow::Key("?", Msg::HelpToggleHelp),
+    HelpRow::Key("!", Msg::HelpForceRestart),
     HelpRow::Key("Tab  1-5", Msg::HelpSwitchTab),
     HelpRow::Key("Left  Right", Msg::HelpSwitchTab),
     HelpRow::Key("Enter", Msg::HelpToggleDetail),

@@ -87,6 +87,8 @@ pub struct HistoryItem {
 pub struct StatusItem {
     pub baseline: String,
     pub alerts: u64,
+    // The daemon runs another build than this inspector.
+    pub stale_build: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -186,6 +188,117 @@ pub enum Mode {
     Search,
 }
 
+// How the inspector loop ended: a plain quit, or a force restart on the latest build.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InspectExit {
+    Quit,
+    Restart,
+}
+
+// Why a force restart would fail, found before the daemon is touched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestartBlock {
+    NotMonitorRun,
+    RelativePath,
+    ExeOwner,
+    Privilege,
+    StateAccess,
+    NewExePrivilege,
+    PreflightUnknown,
+    ExeName,
+}
+
+impl RestartBlock {
+    pub fn toast(self) -> Msg {
+        match self {
+            Self::NotMonitorRun => Msg::ToastRestartNotMonitorRun,
+            Self::RelativePath => Msg::ToastRestartRelativePath,
+            Self::ExeOwner => Msg::ToastRestartExeOwner,
+            Self::Privilege => Msg::ToastRestartNeedsPrivilege,
+            Self::StateAccess => Msg::ToastRestartNeedsStateAccess,
+            Self::NewExePrivilege => Msg::ToastRestartNewExePrivilege,
+            Self::PreflightUnknown => Msg::ToastRestartPreflightUnknown,
+            Self::ExeName => Msg::ToastRestartExeName,
+        }
+    }
+}
+
+// Daemon build against its exe on disk: current, restartable, or blocked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RestartState {
+    #[default]
+    Current,
+    Ready,
+    Blocked(RestartBlock),
+}
+
+// Disk build identifier, settled once two reads in a row agree.
+#[derive(Debug, Default)]
+pub struct DiskBuildWatch {
+    settled: String,
+    last: String,
+}
+
+impl DiskBuildWatch {
+    // True when this read settles a new identifier.
+    pub fn observe(&mut self, disk: &str) -> bool {
+        let settles = disk == self.last && disk != self.settled;
+        if settles {
+            self.settled = disk.to_string();
+        }
+        self.last = disk.to_string();
+        settles
+    }
+
+    // 테스트 전용 조회 (unix 비테스트 빌드의 dead_code 방지)
+    #[cfg(test)]
+    pub fn settled(&self) -> &str {
+        &self.settled
+    }
+}
+
+// Answer of the new exe's `monitor preflight` check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreflightOutcome {
+    Passed,
+    NoPrivilege,
+    Unknown,
+}
+
+// A failed or unknown preflight answer is checked again after this long.
+pub const PREFLIGHT_RETRY: Duration = Duration::from_secs(10);
+
+// The new exe's own capture privilege check for one disk build identifier.
+#[derive(Debug, Default)]
+pub struct PreflightCache {
+    build: String,
+    outcome: Option<PreflightOutcome>,
+    checked_at: Option<Instant>,
+}
+
+impl PreflightCache {
+    // A pass for the stored known build; any other answer until it expires.
+    pub fn lookup(&self, build: &str, now: Instant) -> Option<PreflightOutcome> {
+        if build.is_empty() || build != self.build {
+            return None;
+        }
+        let outcome = self.outcome?;
+        if outcome == PreflightOutcome::Passed {
+            return Some(outcome);
+        }
+        let fresh = self
+            .checked_at
+            .is_some_and(|checked| now.saturating_duration_since(checked) < PREFLIGHT_RETRY);
+        fresh.then_some(outcome)
+    }
+
+    pub fn store(&mut self, build: &str, outcome: PreflightOutcome, now: Instant) {
+        self.build = build.to_string();
+        self.outcome = Some(outcome);
+        self.checked_at = Some(now);
+    }
+}
+
 // 3. state --------------------------------------------------------------------
 pub struct Inspect {
     pub ui: Ui,
@@ -197,10 +310,97 @@ pub struct Inspect {
     // Time of the last loop turn, for the stale marker.
     pub clock: Instant,
     pub last_update: Option<Instant>,
+    // Why a restart cannot run now; `None` when it can.
+    pub restart_block: Option<RestartBlock>,
+    pub restart_requested: bool,
 }
 
 // A daemon silent for this long reads as stale in the app bar.
 pub const STALE_AFTER: Duration = Duration::from_secs(5);
+
+// A daemon is on another build only when its build and its exe's build on
+// disk now are both known, they differ, and it was started with `monitor run`
+// (so it can be started again).
+pub fn daemon_is_stale(daemon_build: &str, disk_build: &str, run_args: &[String]) -> bool {
+    !daemon_build.is_empty()
+        && !disk_build.is_empty()
+        && daemon_build != disk_build
+        && run_args.len() >= 2
+        && run_args[0] == "monitor"
+        && run_args[1] == "run"
+}
+
+// The daemon's own `monitor run` arguments in order, plus `--state-dir` when
+// it had none, plus `--daemonize` when missing; every path must be absolute.
+pub fn daemon_restart_args(
+    run_args: &[String],
+    state_dir: &str,
+) -> Result<Vec<String>, RestartBlock> {
+    // 1. a `monitor run` command
+    if run_args.len() < 2 || run_args[0] != "monitor" || run_args[1] != "run" {
+        return Err(RestartBlock::NotMonitorRun);
+    }
+
+    // 2. absolute state folder and path option values
+    if !state_dir.starts_with('/') {
+        return Err(RestartBlock::RelativePath);
+    }
+    let path_flags = ["--state-dir", "--geoip-country-db", "--geoip-asn-db"];
+    let mut has_state_dir = false;
+    for (index, arg) in run_args.iter().enumerate() {
+        let (flag, path) = match arg.split_once('=') {
+            Some((flag, path)) => (flag, Some(path)),
+            None => (arg.as_str(), run_args.get(index + 1).map(String::as_str)),
+        };
+        if !path_flags.contains(&flag) {
+            continue;
+        }
+        has_state_dir |= flag == "--state-dir";
+        if !path.is_some_and(|path| path.starts_with('/')) {
+            return Err(RestartBlock::RelativePath);
+        }
+    }
+
+    // 3. missing state folder and daemonize flag
+    let mut restart_args = run_args.to_vec();
+    if !has_state_dir {
+        restart_args.push("--state-dir".to_string());
+        restart_args.push(state_dir.to_string());
+    }
+    if !run_args.iter().any(|arg| arg == "--daemonize") {
+        restart_args.push("--daemonize".to_string());
+    }
+    Ok(restart_args)
+}
+
+// A shell command line: a word that is empty or holds a character outside
+// letters, digits, and `-_./=:,@%+` goes in single quotes, `'` as `'\''`.
+pub fn shell_quote_args(program: &str, args: &[String]) -> String {
+    let mut words = Vec::with_capacity(args.len() + 1);
+    for word in std::iter::once(program).chain(args.iter().map(String::as_str)) {
+        let plain = !word.is_empty()
+            && word
+                .chars()
+                .all(|letter| letter.is_ascii_alphanumeric() || "-_./=:,@%+".contains(letter));
+        let quoted = if plain {
+            word.to_string()
+        } else {
+            format!("'{}'", word.replace('\'', r"'\''"))
+        };
+        words.push(quoted);
+    }
+    words.join(" ")
+}
+
+// Exit code of `monitor preflight`: 0 passes, 1 lacks privilege, anything
+// else (an old build, a signal, no run) is unknown.
+pub fn preflight_outcome(exit_code: Option<i32>) -> PreflightOutcome {
+    match exit_code {
+        Some(0) => PreflightOutcome::Passed,
+        Some(1) => PreflightOutcome::NoPrivilege,
+        _ => PreflightOutcome::Unknown,
+    }
+}
 
 impl Inspect {
     pub fn new(state_file: Option<PathBuf>) -> Self {
@@ -218,6 +418,8 @@ impl Inspect {
             should_quit: false,
             clock: Instant::now(),
             last_update: None,
+            restart_block: None,
+            restart_requested: false,
         }
     }
 
@@ -327,6 +529,25 @@ impl Inspect {
                 self.mode = Mode::Search;
                 Command::None
             }
+            UiAction::ForceRestart => {
+                let mismatch = self.data.connected
+                    && self
+                        .data
+                        .status
+                        .as_ref()
+                        .is_some_and(|status| status.stale_build);
+                if !mismatch {
+                    return Command::None;
+                }
+                if let Some(block) = self.restart_block {
+                    let text = i18n::text(self.ui.lang, block.toast());
+                    self.ui.show_toast(text, ToastLevel::Error);
+                    return Command::None;
+                }
+                self.restart_requested = true;
+                self.should_quit = true;
+                Command::None
+            }
             UiAction::TogglePause
             | UiAction::OpenFilter
             | UiAction::OpenColumns
@@ -372,6 +593,7 @@ impl Inspect {
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => self.perform_action(UiAction::Quit),
             KeyCode::Char('?') => self.perform_action(UiAction::ShowHelp),
+            KeyCode::Char('!') => self.perform_action(UiAction::ForceRestart),
             KeyCode::BackTab => self.set_tab(InspectTab::from_index(slot + count - 1)),
             KeyCode::Tab if shifted => self.set_tab(InspectTab::from_index(slot + count - 1)),
             KeyCode::Tab => self.set_tab(InspectTab::from_index(slot + 1)),

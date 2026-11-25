@@ -2,24 +2,27 @@
 //! reducer into plain rows, and the host that plugs the inspector into the
 //! shared event loop. All socket I/O stays off the render loop.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
-use crossbeam_channel::{Receiver, Sender, unbounded};
+use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, unbounded};
 use crossterm::event::{KeyEvent, MouseEvent, MouseEventKind};
 use ratatui::Frame;
 
 use network_monitor_core::alert::Severity;
 use network_monitor_core::app_dir::home_dir;
+use network_monitor_core::build_info::read_build_id;
 use network_monitor_core::inspector::InspectorApp;
 use network_monitor_core::ipc::protocol::{DaemonStatus, Event as IpcEvent};
 use network_monitor_core::ipc::{IpcClient, Request, Response};
 use network_monitor_core::store::models::ConnectionRow;
 
+use crate::inspect::restart::restart_state;
 use crate::inspect::state::{
-    AlertItem, Command, ConnItem, DomainItem, HistoryItem, Inspect, InspectData, InspectTab,
-    ProcItem, SeverityRank, StatusItem,
+    AlertItem, Command, ConnItem, DiskBuildWatch, DomainItem, HistoryItem, Inspect, InspectData,
+    InspectExit, InspectTab, PreflightCache, ProcItem, RestartBlock, RestartState, SeverityRank,
+    StatusItem,
 };
 use crate::inspect::views;
 use crate::tui::i18n;
@@ -30,6 +33,7 @@ use crate::tui::terminal::{TuiHost, enter_terminal, run_event_loop};
 // Rows requested per query, and the least time between data rebuilds.
 const QUERY_LIMIT: usize = 200;
 const REBUILD_INTERVAL: Duration = Duration::from_millis(100);
+const EXE_CHECK_INTERVAL: Duration = Duration::from_secs(2);
 
 // 1. messages -----------------------------------------------------------------
 enum Msg {
@@ -38,6 +42,8 @@ enum Msg {
     Snapshot(Box<Snapshot>),
     // The state writer thread failed to write `tui.toml` (raw error text).
     StateSaveFailed(String),
+    // The force restart state changed.
+    Restart(RestartState),
 }
 
 // Results of one query round; a field is None when its request was not made or failed.
@@ -55,12 +61,30 @@ enum Query {
 }
 
 // 2. query thread -------------------------------------------------------------
-// Serves refresh and history requests so the UI thread never waits on the socket.
-fn query_loop(mut client: IpcClient, queries: Receiver<Query>, replies: Sender<Msg>) {
-    for query in queries {
-        let (with_live, with_history) = match query {
-            Query::Refresh { history } => (true, history),
-            Query::LoadHistory => (false, true),
+// Serves refresh and history requests so the UI thread never waits on the
+// socket, and watches the daemon's exe on disk for a force restart.
+fn query_loop(
+    mut client: IpcClient,
+    socket: PathBuf,
+    queries: Receiver<Query>,
+    replies: Sender<Msg>,
+) {
+    let mut watch = DiskBuildWatch::default();
+    let mut preflight = PreflightCache::default();
+    let mut latest: Option<DaemonStatus> = None;
+    let mut restart = RestartState::Current;
+    let mut last_check: Option<Instant> = None;
+    loop {
+        // 1. a request, or a timeout for the exe check alone
+        let received = queries.recv_timeout(EXE_CHECK_INTERVAL);
+        if matches!(received, Err(RecvTimeoutError::Disconnected)) {
+            break;
+        }
+        let answered = received.is_ok();
+        let (with_live, with_history) = match received {
+            Ok(Query::Refresh { history }) => (true, history),
+            Ok(Query::LoadHistory) => (false, true),
+            Err(_) => (false, false),
         };
         let mut snapshot = Snapshot::default();
         if with_live {
@@ -82,7 +106,46 @@ fn query_loop(mut client: IpcClient, queries: Receiver<Query>, replies: Sender<M
         {
             snapshot.history = Some(rows);
         }
-        if replies.send(Msg::Snapshot(Box::new(snapshot))).is_err() {
+        let status_arrived = snapshot.status.is_some();
+        if status_arrived {
+            latest = snapshot.status.clone();
+        }
+        if answered && replies.send(Msg::Snapshot(Box::new(snapshot))).is_err() {
+            break;
+        }
+
+        // 2. daemon exe build on disk, every interval, and a retry of a
+        // failed or unknown new exe check
+        let mut disk_settled = false;
+        let mut recheck = false;
+        if last_check.is_none_or(|checked| checked.elapsed() >= EXE_CHECK_INTERVAL) {
+            last_check = Some(Instant::now());
+            recheck = matches!(
+                restart,
+                RestartState::Blocked(
+                    RestartBlock::NewExePrivilege | RestartBlock::PreflightUnknown
+                )
+            );
+            let disk_build = latest
+                .as_ref()
+                .map(|status| read_build_id(Path::new(&status.exe_path)))
+                .unwrap_or_default();
+            disk_settled = watch.observe(&disk_build);
+        }
+
+        // 3. restart state, sent on change
+        if !status_arrived && !disk_settled && !recheck {
+            continue;
+        }
+        let Some(status) = latest.as_ref() else {
+            continue;
+        };
+        let next = restart_state(status, &socket, &mut preflight);
+        if next == restart {
+            continue;
+        }
+        restart = next;
+        if replies.send(Msg::Restart(next)).is_err() {
             break;
         }
     }
@@ -99,7 +162,11 @@ fn severity_rank(severity: Severity) -> SeverityRank {
 }
 
 // Plain rows from the core reducer and the last history answer.
-fn build_data(core: &InspectorApp, history: &[ConnectionRow]) -> InspectData {
+fn build_data(
+    core: &InspectorApp,
+    history: &[ConnectionRow],
+    restart: RestartState,
+) -> InspectData {
     InspectData {
         conns: core
             .connections()
@@ -171,6 +238,7 @@ fn build_data(core: &InspectorApp, history: &[ConnectionRow]) -> InspectData {
         status: core.status.as_ref().map(|status| StatusItem {
             baseline: status.baseline.clone(),
             alerts: status.alerts,
+            stale_build: restart != RestartState::Current,
         }),
         connected: core.connected,
         disconnect_detail: core.disconnect_msg.clone(),
@@ -182,6 +250,7 @@ struct InspectHost {
     inspect: Inspect,
     core: InspectorApp,
     history: Vec<ConnectionRow>,
+    restart: RestartState,
     messages: Receiver<Msg>,
     queries: Sender<Query>,
     data_dirty: bool,
@@ -213,6 +282,7 @@ impl InspectHost {
             Msg::Event(event) => self.core.apply(event),
             Msg::Disconnected(detail) => self.core.set_disconnected(detail),
             Msg::StateSaveFailed(detail) => self.inspect.ui.state_save_failed(&detail),
+            Msg::Restart(restart) => self.restart = restart,
             Msg::Snapshot(snapshot) => {
                 let Snapshot {
                     status,
@@ -252,7 +322,11 @@ impl TuiHost for InspectHost {
             .last_build
             .is_none_or(|built| now.saturating_duration_since(built) >= REBUILD_INTERVAL);
         if self.data_dirty && due {
-            let data = build_data(&self.core, &self.history);
+            let data = build_data(&self.core, &self.history, self.restart);
+            self.inspect.restart_block = match self.restart {
+                RestartState::Blocked(block) => Some(block),
+                RestartState::Current | RestartState::Ready => None,
+            };
             self.inspect.set_data(data, now);
             self.data_dirty = false;
             self.last_build = Some(now);
@@ -294,7 +368,7 @@ impl TuiHost for InspectHost {
 }
 
 // 5. entry point --------------------------------------------------------------
-pub fn run_inspector(socket_path: &Path) -> Result<()> {
+pub fn run_inspector(socket_path: &Path) -> Result<InspectExit> {
     // 1. query connection, then a second one subscribed to the event stream
     let query = IpcClient::connect(socket_path)
         .map_err(|e| anyhow!("cannot connect to daemon at {}: {e}", socket_path.display()))?;
@@ -321,7 +395,8 @@ pub fn run_inspector(socket_path: &Path) -> Result<()> {
         }
     });
     let (query_tx, query_rx) = unbounded::<Query>();
-    std::thread::spawn(move || query_loop(query, query_rx, message_tx));
+    let query_socket = socket_path.to_path_buf();
+    std::thread::spawn(move || query_loop(query, query_socket, query_rx, message_tx));
     let _ = query_tx.send(Query::Refresh { history: false });
 
     // 3. state, saved layout (no home directory: state saving is off, with one
@@ -342,6 +417,7 @@ pub fn run_inspector(socket_path: &Path) -> Result<()> {
         inspect,
         core: InspectorApp::new(),
         history: Vec::new(),
+        restart: RestartState::Current,
         messages,
         queries: query_tx,
         data_dirty: false,
@@ -353,5 +429,11 @@ pub fn run_inspector(socket_path: &Path) -> Result<()> {
     drop(terminal);
     drop(_guard);
     host.state_writer.finish_with_warning();
-    outcome
+    outcome?;
+    let exit = if host.inspect.restart_requested {
+        InspectExit::Restart
+    } else {
+        InspectExit::Quit
+    };
+    Ok(exit)
 }

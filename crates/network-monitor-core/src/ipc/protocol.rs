@@ -41,6 +41,15 @@ pub struct DaemonStatus {
     pub alerts: u64,
     pub schema_version: u32,
     pub version: String,
+    /// Build identifier of the daemon's exe; empty from an older daemon.
+    #[serde(default)]
+    pub build_id: String,
+    /// The daemon's launch arguments; empty from an older daemon.
+    #[serde(default)]
+    pub run_args: Vec<String>,
+    /// Path of the daemon's exe; empty from an older daemon.
+    #[serde(default)]
+    pub exe_path: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -135,5 +144,14 @@ mod tests {
         let line = serde_json::to_string(&e).unwrap();
         let back: Event = serde_json::from_str(&line).unwrap();
         assert!(matches!(back, Event::Heartbeat { ts_ms: 42 }));
+    }
+
+    #[test]
+    fn test_status_from_an_older_daemon_defaults_the_build_fields() {
+        let line = r#"{"pid":1,"uptime_secs":2,"interface":"eth0","baseline":"active","learning_ends_ms":null,"processes":0,"destinations":0,"alerts":0,"schema_version":1,"version":"0.1.0"}"#;
+        let status: DaemonStatus = serde_json::from_str(line).unwrap();
+        assert!(status.build_id.is_empty());
+        assert!(status.run_args.is_empty());
+        assert!(status.exe_path.is_empty());
     }
 }

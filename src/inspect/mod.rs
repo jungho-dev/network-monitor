@@ -12,4 +12,8 @@ pub mod views;
 #[cfg(unix)]
 mod glue;
 #[cfg(unix)]
+mod restart;
+#[cfg(unix)]
 pub use glue::run_inspector;
+#[cfg(unix)]
+pub use restart::restart_daemon_and_inspector;

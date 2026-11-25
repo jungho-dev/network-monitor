@@ -153,6 +153,7 @@ pub enum UiAction {
     SaveLog,
     Refresh,
     OpenSearch,
+    ForceRestart,
 }
 
 // 3. hit areas ----------------------------------------------------------------

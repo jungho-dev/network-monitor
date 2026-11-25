@@ -1,6 +1,7 @@
 pub mod alert;
 pub mod analysis;
 pub mod app_dir;
+pub mod build_info;
 pub mod capture;
 pub mod debug;
 pub mod decode;

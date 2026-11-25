@@ -241,6 +241,7 @@ sudo network-monitor monitor run -i en0 \
     - `--no-notify`: 데스크톱 알림을 끄고 로그만 남긴다.
 7. **`monitor status`**와 **`monitor stop`** (Unix 전용)
     - `monitor status [--state-dir <dir>] [--json]`: baseline 상태, pid, 인터페이스, 가동 시간, 프로세스·목적지·경보 개수
+    - 상태에는 `build_id`(기동 시점 데몬 exe 의 크기와 수정 시각), `exe_path`(그 exe 의 경로), `run_args`(데몬 자신의 실행 인자)도 들어 있어 `inspect`가 `build_id`를 지금 `exe_path`에 있는 파일과 비교하며, 이 필드가 없는 이전 빌드 데몬은 불일치로 표시하지 않는다.
     - `monitor stop [--state-dir <dir>]`: 실행 중인 데몬에 정상 종료를 요청한다.
 8. **`inspect`** (Unix 전용)
     - `--state-dir <dir>`: 데몬 소켓을 찾는 데 쓰는 상태 디렉터리
@@ -355,6 +356,8 @@ google
     - `r`: status와 connections 새로 고침
     - `Shift`와 위 또는 아래 방향키: 포커스된 카드 이동, `l`: 현재 보기의 배치 초기화, `L`: 표시 언어 전환
     - `?`: 도움말, `q`, `Esc`, `Ctrl-C`: 종료
+    - `!`: 강제 재시작, 데몬이 실행 중인 자기 exe 가 디스크에서 다른 빌드로 바뀐 뒤에만 동작한다(2초마다 확인). 데몬을 종료하고 같은 경로의 exe 로 데몬 자신의 `monitor run` 인자에 `--daemonize`를 붙여 다시 띄운 뒤 `inspect`를 다시 실행한다. 먼저 캡처 권한(이 `inspect`와, 숨은 `monitor preflight` 명령으로 실행한 새 exe 양쪽), 상태 폴더 쓰기 권한, 데몬 인자의 절대 경로, exe 소유자를 확인하며, 하나라도 실패하면 오류 알림만 띄우고 데몬은 그대로 둔다.
+    - 데몬의 exe 가 디스크에서 다른 빌드이면 앱 바에 `● 빌드 불일치`가 표시되고 경고색 `[!] 강제 재시작` 칩이 하단 맨 앞에 나타나며, 클릭하면 `!`와 같게 동작한다.
 
 ---
 

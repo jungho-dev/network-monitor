@@ -105,6 +105,19 @@ fn render_inspect_bar(frame: &mut Frame, area: Rect, inspect: &Inspect) {
             theme::STYLE_DIM,
         ));
     }
+    if connected
+        && inspect
+            .data
+            .status
+            .as_ref()
+            .is_some_and(|status| status.stale_build)
+    {
+        right.push(Span::raw("  "));
+        right.push(Span::styled(
+            format!("● {}", i18n::text(lang, Msg::BarBuildMismatch)),
+            theme::STYLE_WARN,
+        ));
+    }
     if inspect.is_stale() {
         let secs = inspect.last_update.map_or(0, |last| {
             inspect.clock.saturating_duration_since(last).as_secs()
@@ -646,7 +659,7 @@ fn history_pairs(item: &HistoryItem) -> Vec<(Msg, String)> {
 // 6. footer -------------------------------------------------------------------
 fn render_inspect_footer(frame: &mut Frame, area: Rect, inspect: &mut Inspect) {
     let lang = inspect.ui.lang;
-    let left = vec![
+    let mut left = vec![
         Chip {
             action: UiAction::Refresh,
             key: "r",
@@ -666,6 +679,23 @@ fn render_inspect_footer(frame: &mut Frame, area: Rect, inspect: &mut Inspect) {
             active: false,
         },
     ];
+    if inspect.data.connected
+        && inspect
+            .data
+            .status
+            .as_ref()
+            .is_some_and(|status| status.stale_build)
+    {
+        left.insert(
+            0,
+            Chip {
+                action: UiAction::ForceRestart,
+                key: "!",
+                label: i18n::text(lang, Msg::ChipForceRestart).to_string(),
+                active: true,
+            },
+        );
+    }
     let pick = |msgs: &[Msg]| -> Vec<&'static str> {
         msgs.iter().map(|msg| i18n::text(lang, *msg)).collect()
     };

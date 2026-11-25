@@ -176,4 +176,8 @@ pub enum MonitorAction {
         #[arg(long)]
         state_dir: Option<PathBuf>,
     },
+
+    /// Check that this executable has capture privilege, then exit (used by inspect before a force restart)
+    #[command(hide = true)]
+    Preflight,
 }

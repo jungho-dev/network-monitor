@@ -5,18 +5,23 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use clap::{CommandFactory, Parser};
 use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Modifier;
 
+use crate::core::cli::{Cli, Command as CliCommand, MonitorAction};
 use crate::inspect::state::{
-    AlertItem, Command, ConnItem, DomainItem, HistoryItem, Inspect, InspectData, InspectTab,
-    ProcItem, SeverityRank, StatusItem,
+    AlertItem, Command, ConnItem, DiskBuildWatch, DomainItem, HistoryItem, Inspect, InspectData,
+    InspectTab, PREFLIGHT_RETRY, PreflightCache, PreflightOutcome, ProcItem, RestartBlock,
+    SeverityRank, StatusItem, daemon_is_stale, daemon_restart_args, preflight_outcome,
+    shell_quote_args,
 };
 use crate::inspect::views::render_frame;
 use crate::tui::cards::{CardId, UiAction, scroll_thumb};
 use crate::tui::i18n::Lang;
+use crate::tui::interaction::ToastLevel;
 use crate::tui::layout::SplitGroup;
 use crate::tui::sort::SortState;
 use crate::tui::test_support::{draw, dump, glyph_budget_violations, key};
@@ -106,6 +111,7 @@ fn sample_data(count: u64) -> InspectData {
         status: Some(StatusItem {
             baseline: "learning".into(),
             alerts: 4,
+            stale_build: false,
         }),
         connected: true,
         disconnect_detail: None,
@@ -161,6 +167,19 @@ fn click(inspect: &mut Inspect, column: u16, row: u16, now: Instant) -> Command 
         mouse(MouseEventKind::Down(MouseButton::Left), column, row),
         now,
     )
+}
+
+fn args(words: &[&str]) -> Vec<String> {
+    words.iter().map(|word| word.to_string()).collect()
+}
+
+// A connected inspector whose daemon runs another build.
+fn stale_inspect() -> Inspect {
+    let mut inspect = sample_inspect(10);
+    if let Some(status) = inspect.data.status.as_mut() {
+        status.stale_build = true;
+    }
+    inspect
 }
 
 // 1. size and language matrix -------------------------------------------------
@@ -1015,4 +1034,306 @@ fn every_inspector_cell_stays_inside_the_glyph_budget_in_both_languages() {
             );
         }
     }
+}
+
+// 10. force restart -----------------------------------------------------------
+#[test]
+fn daemon_is_stale_only_for_two_known_different_builds_of_a_monitor_run_daemon() {
+    let run = args(&["monitor", "run", "-i", "eth0"]);
+    assert!(!daemon_is_stale("5-100", "5-100", &run), "same build");
+    assert!(!daemon_is_stale("", "5-100", &run), "older daemon");
+    assert!(!daemon_is_stale("5-100", "", &run), "disk build unknown");
+    assert!(
+        !daemon_is_stale("5-100", "6-200", &args(&["inspect"])),
+        "not monitor run"
+    );
+    assert!(!daemon_is_stale("5-100", "6-200", &[]), "no arguments");
+    assert!(daemon_is_stale("5-100", "6-200", &run));
+}
+
+#[test]
+fn daemon_restart_args_add_daemonize_and_state_dir_and_keep_the_rest_in_order() {
+    assert_eq!(
+        daemon_restart_args(&args(&["monitor", "run", "-i", "eth0"]), "/s"),
+        Ok(args(&[
+            "monitor",
+            "run",
+            "-i",
+            "eth0",
+            "--state-dir",
+            "/s",
+            "--daemonize"
+        ]))
+    );
+    for kept in [
+        args(&["monitor", "run", "--state-dir", "/kept", "--daemonize"]),
+        args(&["monitor", "run", "--state-dir=/kept", "--daemonize"]),
+        args(&[
+            "monitor",
+            "run",
+            "-f",
+            "tcp port 443",
+            "--geoip-country-db",
+            "/geo/country.mmdb",
+            "--geoip-asn-db=/geo/asn.mmdb",
+            "--state-dir=/kept",
+            "--daemonize",
+        ]),
+    ] {
+        assert_eq!(daemon_restart_args(&kept, "/other"), Ok(kept.clone()));
+    }
+}
+
+#[test]
+fn daemon_restart_args_refuse_a_command_other_than_monitor_run() {
+    assert_eq!(
+        daemon_restart_args(&args(&["monitor", "status"]), "/s"),
+        Err(RestartBlock::NotMonitorRun)
+    );
+    assert_eq!(
+        daemon_restart_args(&args(&["run"]), "/s"),
+        Err(RestartBlock::NotMonitorRun)
+    );
+}
+
+#[test]
+fn daemon_restart_args_refuse_a_relative_or_missing_path() {
+    let run = args(&["monitor", "run"]);
+    for state_dir in ["", "s"] {
+        assert_eq!(
+            daemon_restart_args(&run, state_dir),
+            Err(RestartBlock::RelativePath),
+            "state dir {state_dir:?}"
+        );
+    }
+    for relative in [
+        args(&["monitor", "run", "--state-dir", "rel"]),
+        args(&["monitor", "run", "--state-dir=rel"]),
+        args(&["monitor", "run", "--geoip-country-db", "./c"]),
+        args(&["monitor", "run", "--geoip-asn-db=a"]),
+        args(&["monitor", "run", "-i", "eth0", "--geoip-asn-db"]),
+    ] {
+        assert_eq!(
+            daemon_restart_args(&relative, "/s"),
+            Err(RestartBlock::RelativePath),
+            "{relative:?}"
+        );
+    }
+}
+
+#[test]
+fn disk_build_watch_settles_a_build_only_after_two_equal_reads() {
+    let mut watch = DiskBuildWatch::default();
+    assert!(!watch.observe("A"), "one read");
+    assert!(watch.observe("A"), "two reads");
+    assert!(!watch.observe("A"), "already settled");
+    assert!(!watch.observe("B"), "one read of B");
+    assert_eq!(watch.settled(), "A");
+    assert!(watch.observe("B"), "two reads of B");
+    assert_eq!(watch.settled(), "B");
+}
+
+#[test]
+fn disk_build_watch_settles_an_unreadable_exe_only_after_a_known_build() {
+    let mut settled = DiskBuildWatch::default();
+    settled.observe("A");
+    settled.observe("A");
+    assert!(!settled.observe(""));
+    assert!(settled.observe(""));
+    assert_eq!(settled.settled(), "");
+
+    let mut fresh = DiskBuildWatch::default();
+    assert!(!fresh.observe(""));
+    assert!(!fresh.observe(""));
+}
+
+#[test]
+fn bang_is_ignored_without_a_mismatch_and_restarts_once_the_builds_differ() {
+    let mut inspect = sample_inspect(10);
+    assert_eq!(inspect.handle_key(key(KeyCode::Char('!'))), Command::None);
+    assert!(!inspect.should_quit && !inspect.restart_requested);
+
+    let mut stale = stale_inspect();
+    assert_eq!(stale.handle_key(key(KeyCode::Char('!'))), Command::None);
+    assert!(stale.should_quit && stale.restart_requested);
+}
+
+#[test]
+fn bang_without_capture_privilege_only_shows_an_error_toast() {
+    let mut inspect = stale_inspect();
+    inspect.restart_block = Some(RestartBlock::Privilege);
+    inspect.handle_key(key(KeyCode::Char('!')));
+    assert!(!inspect.should_quit && !inspect.restart_requested);
+    let toast = inspect.ui.toast.as_ref().expect("error toast");
+    assert_eq!(toast.level, ToastLevel::Error);
+    assert!(toast.text.contains("sudo or setcap"), "{}", toast.text);
+}
+
+#[test]
+fn bang_without_state_folder_access_only_shows_an_error_toast() {
+    let mut inspect = stale_inspect();
+    inspect.restart_block = Some(RestartBlock::StateAccess);
+    inspect.handle_key(key(KeyCode::Char('!')));
+    assert!(!inspect.should_quit && !inspect.restart_requested);
+    let toast = inspect.ui.toast.as_ref().expect("error toast");
+    assert_eq!(toast.level, ToastLevel::Error);
+    assert!(toast.text.contains("daemon's user"), "{}", toast.text);
+}
+
+#[test]
+fn bang_in_the_search_box_is_typed_as_a_letter() {
+    let mut inspect = stale_inspect();
+    inspect.handle_key(key(KeyCode::Char('/')));
+    inspect.handle_key(key(KeyCode::Char('!')));
+    assert_eq!(inspect.search, "!");
+    assert!(!inspect.should_quit && !inspect.restart_requested);
+}
+
+#[test]
+fn a_build_mismatch_puts_the_force_restart_chip_first_and_marks_the_app_bar() {
+    let mut inspect = sample_inspect(10);
+    let bar = dump(&render(&mut inspect, 130, 40))[0].clone();
+    assert!(!bar.contains("Build mismatch"), "{bar}");
+    assert!(button_rect(&inspect, UiAction::ForceRestart).is_none());
+
+    let mut stale = stale_inspect();
+    let rows = dump(&render(&mut stale, 130, 40));
+    assert!(rows[0].contains("● Build mismatch"), "{}", rows[0]);
+    let chip = button_rect(&stale, UiAction::ForceRestart).expect("force restart chip");
+    for (action, rect) in &stale.ui.hits.button_rects {
+        if *action != UiAction::ForceRestart {
+            assert!(chip.right() <= rect.x, "{action:?} sits before the chip");
+        }
+    }
+    assert!(rows[usize::from(chip.y)].contains("Force restart"));
+    stale.ui.lang = Lang::Ko;
+    let korean = dump(&render(&mut stale, 130, 40));
+    assert!(korean[0].contains("빌드 불일치"), "{}", korean[0]);
+
+    stale.data.connected = false;
+    render(&mut stale, 130, 40);
+    assert!(button_rect(&stale, UiAction::ForceRestart).is_none());
+}
+
+#[test]
+fn preflight_cache_answers_only_for_the_stored_known_build() {
+    let now = Instant::now();
+    let mut cache = PreflightCache::default();
+    assert_eq!(cache.lookup("5-100", now), None, "empty cache");
+    cache.store("5-100", PreflightOutcome::Passed, now);
+    assert_eq!(cache.lookup("5-100", now), Some(PreflightOutcome::Passed));
+    assert_eq!(cache.lookup("6-200", now), None, "another build");
+    cache.store("6-200", PreflightOutcome::NoPrivilege, now);
+    assert_eq!(
+        cache.lookup("6-200", now),
+        Some(PreflightOutcome::NoPrivilege)
+    );
+    assert_eq!(cache.lookup("", now), None, "unknown build");
+
+    let mut blank = PreflightCache::default();
+    blank.store("", PreflightOutcome::Passed, now);
+    assert_eq!(
+        blank.lookup("", now),
+        None,
+        "an empty build is never cached"
+    );
+}
+
+#[test]
+fn preflight_cache_keeps_a_pass_and_expires_a_failure_after_the_retry_interval() {
+    let now = Instant::now();
+    let later = now + PREFLIGHT_RETRY;
+    let mut cache = PreflightCache::default();
+    cache.store("5-100", PreflightOutcome::Passed, now);
+    assert_eq!(cache.lookup("5-100", later), Some(PreflightOutcome::Passed));
+
+    cache.store("5-100", PreflightOutcome::NoPrivilege, now);
+    assert_eq!(
+        cache.lookup("5-100", now + Duration::from_secs(9)),
+        Some(PreflightOutcome::NoPrivilege)
+    );
+    assert_eq!(cache.lookup("5-100", later), None, "expired failure");
+
+    cache.store("5-100", PreflightOutcome::Unknown, now);
+    assert_eq!(cache.lookup("5-100", later), None, "expired unknown");
+}
+
+#[test]
+fn preflight_outcome_reads_only_exit_codes_zero_and_one_as_answers() {
+    assert_eq!(preflight_outcome(Some(0)), PreflightOutcome::Passed);
+    assert_eq!(preflight_outcome(Some(1)), PreflightOutcome::NoPrivilege);
+    assert_eq!(
+        preflight_outcome(Some(2)),
+        PreflightOutcome::Unknown,
+        "old build"
+    );
+    assert_eq!(
+        preflight_outcome(None),
+        PreflightOutcome::Unknown,
+        "no exit code"
+    );
+}
+
+#[test]
+fn unknown_preflight_and_exe_name_blocks_map_to_their_toasts() {
+    let unknown = crate::tui::i18n::text(Lang::En, RestartBlock::PreflightUnknown.toast());
+    assert_eq!(
+        unknown,
+        "New exe could not check its capture privilege: restart the daemon by hand"
+    );
+    let name = crate::tui::i18n::text(Lang::Ko, RestartBlock::ExeName.toast());
+    assert_eq!(name, "데몬 exe 이름이 inspect 와 다름: 수동으로 재시작");
+}
+
+#[test]
+fn shell_quote_args_quotes_only_words_the_shell_would_split() {
+    assert_eq!(
+        shell_quote_args("/usr/bin/nm", &args(&["monitor", "run", "-i", "eth0"])),
+        "/usr/bin/nm monitor run -i eth0"
+    );
+    assert_eq!(
+        shell_quote_args("/nm", &args(&["-f", "tcp port 443"])),
+        "/nm -f 'tcp port 443'"
+    );
+    assert_eq!(shell_quote_args("/nm", &args(&["it's"])), r"/nm 'it'\''s'");
+    assert_eq!(
+        shell_quote_args("/nm", &args(&["--state-dir", ""])),
+        "/nm --state-dir ''"
+    );
+    assert_eq!(
+        shell_quote_args("/opt/my tools/nm", &args(&["monitor"])),
+        "'/opt/my tools/nm' monitor"
+    );
+}
+
+#[test]
+fn bang_when_the_new_build_lacks_capture_privilege_asks_for_setcap_again() {
+    let mut inspect = stale_inspect();
+    inspect.restart_block = Some(RestartBlock::NewExePrivilege);
+    inspect.handle_key(key(KeyCode::Char('!')));
+    assert!(!inspect.should_quit && !inspect.restart_requested);
+    let toast = inspect.ui.toast.as_ref().expect("error toast");
+    assert_eq!(toast.level, ToastLevel::Error);
+    assert!(toast.text.contains("setcap"), "{}", toast.text);
+}
+
+#[test]
+fn monitor_preflight_parses_and_stays_out_of_the_monitor_help() {
+    let cli = Cli::try_parse_from(["network-monitor", "monitor", "preflight"])
+        .expect("monitor preflight parses");
+    assert!(matches!(
+        cli.command,
+        Some(CliCommand::Monitor {
+            action: MonitorAction::Preflight
+        })
+    ));
+    let mut command = Cli::command();
+    let monitor = command
+        .find_subcommand_mut("monitor")
+        .expect("monitor subcommand");
+    let help = monitor.render_help().to_string();
+    assert!(
+        help.contains("status") && !help.contains("preflight"),
+        "{help}"
+    );
 }

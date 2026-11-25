@@ -700,6 +700,7 @@ impl App {
                 }
             }
             UiAction::Refresh => Command::None,
+            UiAction::ForceRestart => Command::None,
         }
     }
 
