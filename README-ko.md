@@ -128,7 +128,9 @@ Windows에서는 sudo 없이 관리자 프롬프트에서 같은 명령을 실�
 ```
 
 3. **화면 읽기**
-    - 위에서 아래로: 앱 바(인터페이스 또는 파일, 캡처 상태, 카운터), 필터 입력줄, 옆에 상세 카드가 붙은 패킷 목록(Time, Dir, Process, Host, IP, Proto, Len, Info), hex 카드, 처리량 줄, 하단 칩과 안내 줄이다.
+    - 위에서 아래로: 앱 바(인터페이스 또는 파일, 캡처 상태, 카운터), 탭 바(Packets, Flows, Stats, Alerts, Stream, Settings), 탭 본문, 하단 칩과 안내 줄이다.
+    - Packets 탭에는 필터 입력줄, 옆에 상세 카드가 붙은 패킷 목록(Time, Dir, Process, Host, IP, Proto, Len, Info), hex 카드, 처리량 줄이 있다.
+    - `1`부터 `6` 또는 `Tab`으로 탭을 바꾸고, `v`로 출력 레벨(`debug`, `info`, `warn`, `error`)을 올리면 경고와 오류만 목록에 남는다.
     - 앱 바는 `LIVE`, `BROWSE`, `PAUSED` 중 하나와 패킷·유실 카운터, 갱신 신선도 점을 보여 준다.
     - `/`로 필터, `Space`로 일시 정지, `w`로 보이는 패킷을 로그 파일로 저장, `L`로 표시 언어 전환, `?`로 전체 키 보기, `q`로 종료한다. 전체 키 목록은 키 조작, 화면 동작은 터미널 UI를 참고한다.
 4. **권한 없이 해 보기**
@@ -178,12 +180,13 @@ sudo network-monitor monitor run -i en0 \
 1. **패킷 분석기**
     - 임의 인터페이스의 BPF 필터 라이브 캡처, PCAP 또는 PCAPNG 저장(`-w`, `--pcapng`)
     - 디코더: Ethernet, ARP, IPv4/IPv6, TCP, UDP, ICMP/ICMPv6, DNS(질문과 응답), TLS(SNI와 JA3/JA4 fingerprint), HTTP/1.1, 평문 HTTP/2(HPACK), QUIC long header 감지
-    - follow-stream 오버레이(`f`)를 갖춘 TCP 스트림 재조립과 RTT 추정
-    - 오버레이: top talkers(`t`), 프로토콜 분포(`P`), flows(`F`), 연결 타임라인(`T`), 북마크(`'`). 실시간 처리량 줄은 항상 보인다.
+    - TCP 스트림 재조립과 RTT 추정, `f`로 선택한 TCP 패킷의 스트림을 Stream 탭에서 따라가기
+    - 기본 순서의 여섯 탭(`1`부터 `6`): Packets(패킷 목록, 상세 트리, hex 덤프, 필터 입력줄, 처리량 줄), Flows(연결 타임라인 위의 flows), Stats(프로토콜 분포 옆의 top talkers), Alerts(북마크 위의 위협 경보 표), Stream(`f`로 연 TCP 스트림의 follow-stream), Settings(출력 레벨과 언어). 탭 순서는 바꿀 수 있다.
     - 정규식 검색(`Ctrl-F`), 북마크(`m`), 인바운드/아웃바운드 보기(`i`, `o`), 열 표시 설정(`c`), 정렬 가능한 표와 폭을 끌어 조절하는 열(`s`, `S`, 머리글 클릭)
     - 마우스, 표시 언어(`L`), 카드 배치, 저장되는 레이아웃: 터미널 UI를 참고한다.
     - 패킷 목록의 평문 경고: HTTP Basic 자격 증명, FTP `PASS`, 비정상 포트의 평문 HTTP
-    - 패킷에 태그를 붙이고 `threat` 필터와 일치하는 라이브 정찰 휴리스틱: `PORT-SCAN`(10초 안에 한 호스트의 서로 다른 포트 15개 이상), `HOST-SWEEP`(10초 안에 서로 다른 호스트 12개 이상), `RARE-DEST`(공인 호스트의 비일반 포트로 향하는 평문)
+    - 패킷에 태그를 붙이고 `threat` 필터와 일치하는 라이브 정찰 휴리스틱: `PORT-SCAN`(10초 안에 한 호스트의 서로 다른 포트 15개 이상), `HOST-SWEEP`(10초 안에 서로 다른 호스트 12개 이상), `RARE-DEST`(공인 호스트의 비일반 포트로 향하는 연결 시도나 평문 데이터이며, 출발지, 목적지, 목적지 포트마다 60초에 한 번만 태그한다. 로컬 주소로 들어오는 트래픽, 일반 서비스 포트에서 임시 포트로 가는 응답, 데이터 없는 세그먼트, TLS 레코드나 QUIC 같은 암호화 페이로드에는 붙이지 않는다)
+    - 출력 레벨(`v`, Settings 탭, 또는 `[display] output_level`): `debug`(기본값, 모두 표시), `info`, `warn`, `error`. `error`는 `PORT-SCAN`과 `HOST-SWEEP`, `warn`은 `RARE-DEST`, 경고 수준 이상 징후, 재전송, `info`는 정보 수준 이상 징후, `debug`는 나머지 전부다. 레벨보다 낮은 항목은 패킷 목록, 경보 표, `w` 로그 내보내기에서 숨기며, pcap `-w` 출력, `--json`, 데몬, Flows와 Stats 탭은 걸러내지 않는다. warn 행은 차분한 전경색, error 행은 배경 채움 없는 붉은 전경색을 쓴다.
     - 패킷 수(`-c`)와 시간(`-G`) 제한을 줄 수 있는 JSON lines 출력(`--json`)
 2. **Egress 모니터**
     - 백그라운드 데몬이 지속적으로 캡처하며, 각 flow의 5-tuple을 OS 소켓 테이블로 프로세스에 매핑하고, 목적지 이름을 DNS 응답과 TLS SNI에서 패시브하게 해석한다(복호화 없음).
@@ -303,6 +306,7 @@ google
     - 파일: `~/.config/network-monitor/config.toml`이며, 모든 키를 주석과 함께 담은 사본은 [docs/config.example.toml](docs/config.example.toml)이다.
     - `[capture] default_interface`: `-i`를 생략했을 때 쓰는 인터페이스
     - `[display] color_scheme`: 읽어 들이며 기본값은 `"dark"`이지만 아직 적용되지 않는다.
+    - `[display] output_level`: 캡처 TUI의 최소 출력 레벨이며 `"debug"`(기본값), `"info"`, `"warn"`, `"error"` 중 하나다. 알 수 없는 값은 stderr에 경고를 한 번 출력하고 `debug`로 대체한다. `v` 키와 Settings 탭이 이 값을 덮어쓰며 선택은 `tui.toml`에 저장된다.
     - `[filters]`: `name = "filter"` 표이며 필터 입력줄에서 `:name`으로 불러온다.
     - 파싱에 실패한 파일은 stderr에 메시지(`network-monitor: ignoring invalid <path>: ...`)를 남기고 무시하며 기본값을 쓴다.
 3. **사용자별 파일 전체를 담는 폴더 하나**
@@ -326,7 +330,6 @@ google
     - `j` / `Down`, `k` / `Up`: 포커스된 카드의 선택 행 이동. 상세 카드와 hex 카드는 스크롤한다.
     - `g` / `Home`: 첫 행, `G` / `End`: 마지막 행이며 `LIVE`로 복귀
     - `PageUp` / `PageDown`: 한 화면만큼 행 이동
-    - `Tab` / `Shift-Tab`: 다음 또는 이전 카드(목록, 상세, hex)로 포커스 이동
     - 위로 이동하거나 맨 위로 가면 `LIVE`에서 `BROWSE`가 되고, `G`나 마지막 행 도달로 `LIVE`에 복귀한다.
 2. **캡처 TUI: 정렬**
     - `s`: 포커스된 표의 다음 열로 정렬하며, 순환의 끝은 캡처 순서다.
@@ -337,16 +340,19 @@ google
     - `Ctrl-F`: info, source, destination에 대한 정규식 검색(`Enter` 실행, `Esc` 해제), `n`은 다음 일치로 이동
     - `i` / `o`: 인바운드만 / 아웃바운드만 표시, 다시 누르면 해제
 4. **캡처 TUI: 보기**
-    - `t` top talkers, `P` 프로토콜 분포, `F` flows, `T` 타임라인, `f` 선택한 TCP 스트림 따라가기, `'` 북마크. 같은 키를 다시 누르거나 `Esc`로 닫는다.
+    - `1`부터 `6`까지 탭 열기, `Tab` / `Right` 다음 탭, `Shift-Tab` / `Left` 이전 탭, `Enter` 다음 카드로 포커스 이동(Settings에서는 선택한 설정 변경)
+    - `t` / `P` Stats, `F` / `T` Flows, `'` Alerts, `f` 선택한 TCP 패킷의 스트림을 Stream 탭에서 열기, `Esc` Packets로 복귀
+    - `<` / `>`: 활성 탭을 왼쪽 또는 오른쪽으로 이동, 탭 바에서 탭을 끌면 순서가 바뀐다(`Esc`로 취소).
     - `d`는 상세 카드, `x`는 hex 카드, `z`는 둘 다 토글한다.
     - `c`는 열 편집기를 연다. `1`부터 `8`까지 Time, Dir, Process, Host, IP, Proto, Len, Info를 토글하고 `Esc`, `Enter`, `c`로 닫는다.
 5. **캡처 TUI: 동작**
     - `Space`: 일시 정지 또는 재개
     - `m`: 선택한 패킷에 북마크
     - `w`: 보이는 패킷을 로그 파일로 저장
+    - `v`: 출력 레벨 순환(`debug`, `info`, `warn`, `error`)
     - `Shift`와 방향키: 포커스된 카드 이동(터미널 UI 참고)
     - `l`: 카드 순서, 크기, 열 폭 초기화, `L`: 표시 언어 전환
-    - `?`: 도움말, `q`, `Esc`, `Ctrl-C`: 종료(`Esc`는 통계 보기가 열려 있으면 먼저 그것을 닫는다)
+    - `?`: 도움말, `q`, `Ctrl-C`: 종료, `Esc`: Packets로 복귀하며 Packets에서는 종료
 6. **Inspector**
     - `Tab` / `Right` 다음 보기, `Shift-Tab` / `Left` 이전 보기, `1`부터 `5`까지 Connections, Processes, Domains, Alerts, History로 이동
     - `j` / `Down`, `k` / `Up`, `PageUp` / `PageDown`, `Home` / `End`: 선택 행 이동
@@ -365,6 +371,7 @@ google
 
 1. **모양**
     - 두 TUI가 같은 스타일을 쓴다. 앱 바(제품 배지, 인터페이스 또는 파일, 캡처 상태, 신선도 점), 카드, 도움말과 종료를 오른쪽 끝에 고정한 클릭 가능한 하단 칩, 안내 줄로 구성된다.
+    - 캡처 화면은 앱 바, 탭 바, 활성 탭의 본문, 처리량 줄(Packets 탭에서만, 화면 높이가 24행 이상일 때), 두 줄의 하단(칩과 안내)을 위에서 아래로 쌓으며, `[v] <level>` 칩이 언어 칩 앞에 놓인다.
     - 카드는 둥근 테두리이며, 포인터 아래의 카드는 더 밝은 테두리, 포커스된 카드는 제목이 반전된 굵은 테두리가 된다.
     - 표는 별도의 회색 거터 열에 스크롤바(`░` 트랙, `█` 썸)를 보이고 아래 테두리에 ` a-b / total `을 표시하며, 선택 행은 색 띠로 나타난다.
     - 안내 줄은 포인터 아래 대상, 그다음 포커스된 카드에 해당하는 키를 보여 준다. 알림은 4초 동안 유지되며 오류 알림만 붉은 채움이다.
@@ -389,7 +396,7 @@ google
     - 패킷 데이터, 주소, 프로토콜 이름, 프로세스 이름, 필터 텍스트는 번역하지 않는다. 상세 카드의 프로토콜 필드 레이블은 프로토콜 표기 그대로 둔다.
 5. **상태 파일**
     - 경로: `~/.config/network-monitor/tui.toml`이며 `config.toml` 옆에 있고 두 TUI가 함께 읽고 쓴다.
-    - 내용: `version`, `language`, 카드 순서, 분할 비율, 열 폭이다. 기본값과 다른 값만 기록하며, 변경이 확정될 때만(놓기, 드래그 종료, 초기화, 언어 전환) 저장한다.
+    - 내용: `version`, `language`, `output_level`, `capture_tab_order`, 카드 순서, 분할 비율, 열 폭이다. 기본값과 다른 값만 기록하며(`output_level`은 선택한 뒤에만), 변경이 확정될 때만(놓기, 드래그 종료, 초기화, 언어 전환, 출력 레벨 변경, 탭 이동) 저장한다.
     - 저장은 백그라운드 쓰기 스레드에서 실행된다. 연속된 변경은 가장 최근 상태 하나로 합치고, 저장에 실패하면 오류 알림을 표시하며, 종료할 때는 쓰기 스레드를 최대 5초 기다리고 마지막 저장이 실패했거나 아직 진행 중이면 stderr에 경고 한 줄을 출력한다.
     - 같은 폴더의 임시 파일을 거쳐 교체하므로 저장이 중단돼도 기존 파일이 남고, 심볼릭 링크(최대 16단계 연쇄)는 유지한 채 최종 대상 파일을 갱신하며, root로 실행 중이면 다른 사용자가 소유한 링크는 거부한다.
     - 중단된 저장이 남긴 임시 파일은 시작할 때 만든 지 60초 이상 지난 것만 지우므로, 실행 중인 다른 인스턴스의 저장을 방해하지 않는다.

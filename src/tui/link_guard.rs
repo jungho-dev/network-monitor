@@ -242,10 +242,13 @@ mod tests {
 
     #[test]
     fn root_refuses_a_foreign_directory_link_above_the_file_and_ignores_plain_paths() {
+        // The temp root itself may sit under a link (macOS `/var`, a Windows
+        // junction TEMP), so the plain-path check starts from its real path.
         let dir = tempfile::tempdir().unwrap();
-        let real_dir = dir.path().join("real");
+        let base = fs::canonicalize(dir.path()).unwrap();
+        let real_dir = base.join("real");
         fs::create_dir_all(&real_dir).unwrap();
-        let dir_link = dir.path().join("dir-link");
+        let dir_link = base.join("dir-link");
         #[cfg(unix)]
         let made = std::os::unix::fs::symlink(&real_dir, &dir_link).is_ok();
         #[cfg(windows)]

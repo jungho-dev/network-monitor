@@ -56,7 +56,7 @@ network-monitor/
 │  ├─ main.rs
 │  ├─ core/ (cli.rs, config.rs, permissions.rs)
 │  ├─ inspect/ (mod.rs, state.rs, views.rs, glue.rs, tests.rs)
-│  └─ tui/ (mod.rs, state.rs, theme.rs, i18n.rs, layout.rs, layout_store.rs, state_writer.rs, link_guard.rs, interaction.rs, format.rs, cards.rs, columns.rs, sort.rs, stats.rs, capture_io.rs, terminal.rs, views/)
+│  └─ tui/ (mod.rs, state.rs, theme.rs, i18n.rs, layout.rs, layout_store.rs, state_writer.rs, link_guard.rs, interaction.rs, format.rs, cards.rs, columns.rs, sort.rs, level.rs, tab_move.rs, stats.rs, capture_io.rs, terminal.rs, views/)
 └─ crates/network-monitor-core/
    ├─ Cargo.toml
    └─ src/
@@ -78,10 +78,13 @@ network-monitor/
 ```markdown
 src/main.rs: 명령 dispatch, 디코드 스레드, JSON 출력 루프, 데몬과 inspector 진입점
 src/core/cli.rs: 모든 명령과 옵션의 clap 정의
-src/core/config.rs: 선택 사항인 config.toml(기본 인터페이스, 읽기만 하고 쓰지 않는 color_scheme, 저장 필터)
+src/core/config.rs: 선택 사항인 config.toml(기본 인터페이스, 읽기만 하고 쓰지 않는 color_scheme, output_level, 저장 필터)
 crates/network-monitor-core/src/app_dir.rs: 사용자별 폴더 하나인 ~/.config/network-monitor/(설정, 데몬 상태, 저장 캡처 로그)
 src/core/permissions.rs: 캡처 권한 검사(Linux: root 필요, Windows: Npcap과 관리자 안내)
 src/tui/: 두 TUI가 함께 쓰는 터미널 UI 키트와 캡처 화면(터미널 UI 참고)
+src/tui/level.rs: 출력 레벨(debug, info, warn, error)과 패킷에서 레벨로의 매핑
+src/tui/tab_move.rs: 캡처 탭 순서 변경(탭 드래그, < 와 > 키)
+src/tui/views/alerts.rs, src/tui/views/settings.rs: Alerts 탭과 Settings 탭
 src/inspect/: inspector TUI이며 일반 행 상태와 보기는 모든 플랫폼에서, 데몬 소켓 연결부는 Unix에서만 빌드된다
 build.rs: Windows 리소스 삽입과, gnullvm 타깃에서 libunwind.dll 복사
 assets/icon: WebP 원본 두 개, 생성된 ICO, 리소스 스크립트, ICO 재생성 스크립트
@@ -201,17 +204,20 @@ pcap interface
 ## 7. 터미널 UI
 
 1. **모듈 구성**
-    - `src/tui/`는 두 화면이 함께 쓴다. `theme.rs`(Indexed 색 팔레트), `i18n.rs`(en/ko 카탈로그), `layout.rs`(분할 비율과 카드 순서), `layout_store.rs`(상태 파일), `state_writer.rs`(상태 저장 스레드), `link_guard.rs`(심볼릭 링크 해석과 root 가드), `interaction.rs`(제스처, 주입 시계), `format.rs`(표시 폭 기반 텍스트), `cards.rs`와 `columns.rs`(카드 id, 적중 영역, 열 정의), `sort.rs`(타입 정렬 키), `views/`(`chrome.rs` 앱 바·탭·하단·도움말, `common.rs` 카드·표·스크롤바, 캡처 보기)로 이루어진다.
+    - `src/tui/`는 두 화면이 함께 쓴다. `theme.rs`(Indexed 색 팔레트), `i18n.rs`(en/ko 카탈로그), `layout.rs`(분할 비율과 카드 순서), `layout_store.rs`(상태 파일), `state_writer.rs`(상태 저장 스레드), `link_guard.rs`(심볼릭 링크 해석과 root 가드), `interaction.rs`(제스처, 주입 시계), `format.rs`(표시 폭 기반 텍스트), `cards.rs`와 `columns.rs`(카드 id, 적중 영역, 열 정의), `sort.rs`(타입 정렬 키), `level.rs`(출력 레벨과 패킷에서 레벨로의 매핑), `tab_move.rs`(캡처 탭 순서 변경), `views/`(`chrome.rs` 앱 바·탭·하단·도움말, `common.rs` 카드·표·스크롤바, `alerts.rs`와 `settings.rs`를 포함한 캡처 보기)로 이루어진다.
     - `state.rs`는 캡처 상태를 가지며 키나 마우스 전이마다 `Command`를 반환하고, `mod.rs`가 I/O 명령을 백그라운드 스레드로 보낸다.
     - 보기는 `&mut App` 또는 `&mut Inspect` 위의 순수 렌더 함수이며 적중 영역만 기록한다. 적중 영역은 매 프레임 시작에 초기화된다.
 2. **터미널 수명 주기**
     - `terminal.rs`는 raw 모드, alternate screen, 마우스 캡처, 숨긴 커서를 함께 켜고, 하나의 멱등 복원을 공유하는 `Drop` 가드와 panic hook에서 복원한다.
     - 공용 이벤트 루프(`TuiHost`)는 상태가 바뀌었거나 1초 유휴 간격이 지나면 다시 그리고, 그리기 전에 쌓인 입력을 모두 처리하며, 키 해제 이벤트를 무시하고, 대기 시간을 다음 타이머(알림 만료나 길게 누름 기준 시간)까지로 줄인다.
 3. **캡처 TUI**
-    - 레이아웃: 앱 바, 필터 입력줄, 옆에 상세 카드가 붙은 패킷 목록, hex 카드, 처리량 줄(화면 높이가 24행 이상일 때만), 하단
-    - 목록, 상세, hex는 두 그룹의 카드다. `CaptureRows`(위쪽 주 영역과 hex, 크기 조절 가능)와 `CaptureCols`(목록과 상세, 크기 조절과 순서 변경 가능)다.
+    - 레이아웃: 앱 바, 탭 바, 활성 탭의 본문, 처리량 줄(Packets 탭에서만, 화면 높이가 24행 이상일 때만), 두 줄의 하단(칩과 안내)
+    - 탭: `CaptureTab`은 여섯 탭(Packets, Flows, Stats, Alerts, Stream, Settings)이며 그려진 순서대로 `1`부터 `6` 키를 쓴다. `switch_tab`은 카드 이동을 취소하고, 움직였던 드래그를 확정하고, 탭의 주 카드에 키를 넘기며, Flows, Stats, Alerts에서는 통계 캐시를 dirty로 표시한다.
+    - 탭 순서는 공유 `Ui`의 `Ui::tab_order`이므로 inspector의 상태 저장도 이를 유지한다. `tab_move.rs`는 탭 드래그를 미리 보여 주고, `Esc`로 순서를 복원하며, `<`와 `>`로 활성 탭을 이동한다.
+    - Packets 본문은 필터 입력줄 아래의 목록·상세 카드와 hex 카드이며, 목록, 상세, hex는 두 그룹의 카드다. `CaptureRows`(위쪽 주 영역과 hex, 크기 조절 가능)와 `CaptureCols`(목록과 상세, 크기 조절과 순서 변경 가능)다. Flows, Stats, Alerts, Settings는 각자 자기 카드를 나눈다.
+    - 출력 레벨: `OutputLevel`은 `[display] output_level`(`Config::output_level`)에서 오고, 저장된 선택이 이를 덮어쓰며(`Ui::min_level`), `v` 또는 Settings 탭이 순환한다. `level_of`는 패킷의 threat, anomaly severity, 재전송 표시를 레벨로 매핑하고, `passes`는 텍스트·방향 필터와 함께 레벨보다 낮은 패킷을 숨긴다(`debug`에서는 건너뛴다). warn 행은 차분한 전경색, error 행은 채움 없는 붉은 전경색으로 그린다.
     - 패킷 목록은 링 전체 위에서 보이는 행만 그리며, 정렬은 보이는 인덱스를 타입 키로 정렬한다(캐시하며 패킷이 들어오는 동안 최대 500 ms마다 다시 만든다).
-    - 전체 영역 통계 보기(top talkers, 프로토콜 분포, flows, 타임라인, follow-stream, 북마크)는 최대 500 ms마다 다시 만드는 캐시를 읽는다.
+    - 통계 탭(Flows, Stats, Alerts)은 최대 500 ms마다 다시 만드는 캐시(top talkers, flows, 타임라인, 북마크, 출력 레벨 이상의 threat 행)를 읽고, Stream 탭은 `f`를 눌렀을 때 만든 스트림을 보여 준다.
     - 입력 모드: `Normal`, `FilterInput`, `Search`, `ColumnConfig`. `LIVE`는 보기를 최신 패킷에 고정하고 수동 이동은 `BROWSE`로 전환한다.
 4. **Inspector TUI**
     - 다섯 탭(Connections, Processes, Domains, Alerts, History)이며 각 탭은 순서를 바꿀 수 있는 한 그룹 안의 표 카드와 상세 카드다.
@@ -242,7 +248,7 @@ pcap interface
     - 설정 파일: 그 폴더의 `config.toml`(읽기 전용이며 프로그램이 쓰지 않는다). 이 파일이 없고 이전 `<config_dir>/network-monitor/config.toml`이 있으면 시작 시 새 경로를 알리는 안내를 한 줄 출력한다.
     - 데몬 상태: 그 폴더 또는 `--state-dir`로 지정한 디렉터리의 `network-monitor.sock`, `network-monitor.db`, `network-monitor.pid`, `monitor.log`. 이전 `<data_local_dir>/network-monitor`가 있고 새 폴더에 데이터베이스가 아직 없으면 `monitor::paths::resolve`가 두 경로를 담은 안내를 한 줄 출력하며, 데이터는 옮기지 않는다.
     - 저장 캡처 로그: 그 폴더의 `network-monitor-<YYYYMMDD-HHMMSS>.log`이며 `tui::capture_io::write_log_in`이 백그라운드 스레드에서 쓴다(`w` 키). root로 실행 중이면 경로 어디서든 다른 사용자가 소유한 심볼릭 링크를 거부하고, 홈 디렉터리가 없으면 오류 알림과 함께 내보내기가 실패한다.
-    - TUI 상태: 그 폴더의 `tui.toml`이며 두 TUI가 공유한다(`tui::layout_store`). `version`, `language`, 카드 순서, 분할 비율, 열 폭을 안정적인 그룹·카드 이름 키로 저장한다. 저장은 상태 저장 스레드(`tui::state_writer`)가 맡는다. UI 스레드가 확정 이벤트에서 파일 내용 전체를 만들어 큐에 넣고, 한 경로에 몰린 요청은 최신 내용 하나로 합치며, 쓰기 실패는 타입 있는 메시지와 오류 알림으로 돌아오고, 종료 경로는 스레드를 최대 5초 기다린 뒤 마지막 쓰기가 실패했거나 아직 진행 중이면 stderr에 경고 한 줄을 출력한다. 쓰기는 원자적이며(대상 폴더에 배타적으로 만든 임시 파일에 쓰고 sync한 뒤 이름 바꾸기) 확정 이벤트에서만 일어나고, 심볼릭 링크 연쇄(최대 16단계, `tui::link_guard`)를 먼저 따라가 링크가 유지되며, 유효 사용자 ID 0인 프로세스는 다른 사용자가 소유한 링크를 거부한다. 읽을 수 없거나 다른 버전인 파일은 첫 덮어쓰기 전에 `tui.toml.bak`으로 복사하고, 시작할 때 만든 지 60초 이상 된 `tui.toml.<pid>.tmp`만 지우며(더 어린 파일은 다른 인스턴스가 저장 중일 수 있다), 잘못된 항목은 건너뛰고, 열 폭은 512칸으로 제한한다. 테스트는 경로, 시계, 소유자 조회를 주입한다.
+    - TUI 상태: 그 폴더의 `tui.toml`이며 두 TUI가 공유한다(`tui::layout_store`). `version`, `language`, `output_level`(선택한 뒤에만 기록), `capture_tab_order`(기본 순서와 다를 때만 기록하고 전체 순열일 때만 복원), 카드 순서, 분할 비율, 열 폭을 안정적인 그룹·카드 이름 키로 저장한다. 저장은 상태 저장 스레드(`tui::state_writer`)가 맡는다. UI 스레드가 확정 이벤트에서 파일 내용 전체를 만들어 큐에 넣고, 한 경로에 몰린 요청은 최신 내용 하나로 합치며, 쓰기 실패는 타입 있는 메시지와 오류 알림으로 돌아오고, 종료 경로는 스레드를 최대 5초 기다린 뒤 마지막 쓰기가 실패했거나 아직 진행 중이면 stderr에 경고 한 줄을 출력한다. 쓰기는 원자적이며(대상 폴더에 배타적으로 만든 임시 파일에 쓰고 sync한 뒤 이름 바꾸기) 확정 이벤트에서만 일어나고, 심볼릭 링크 연쇄(최대 16단계, `tui::link_guard`)를 먼저 따라가 링크가 유지되며, 유효 사용자 ID 0인 프로세스는 다른 사용자가 소유한 링크를 거부한다. 읽을 수 없거나 다른 버전인 파일은 첫 덮어쓰기 전에 `tui.toml.bak`으로 복사하고, 시작할 때 만든 지 60초 이상 된 `tui.toml.<pid>.tmp`만 지우며(더 어린 파일은 다른 인스턴스가 저장 중일 수 있다), 잘못된 항목은 건너뛰고, 열 폭은 512칸으로 제한한다. 테스트는 경로, 시계, 소유자 조회를 주입한다.
 
 ---
 
@@ -289,5 +295,5 @@ cargo build --workspace
 ```
 
 2. **범위**
-    - core crate는 디코더, flow tracker, 필터, 링, writer, 경보 엔진, IPC의 단위 테스트를 가지며, 바이너리 crate는 모든 보기를 영어와 한국어로 60x16, 100x30, 130x40에서 그리는 `TestBackend` 버퍼 테스트(포커스, 스크롤바, 선택 띠, 알림, 칩의 정확한 셀과 실제 마우스 이벤트를 통한 적중 영역), 길게 누름·드래그·놓침에 대한 시계 주입 테스트, 정렬 순환·열 폭 결정·분할 비율·상태 저장소·상태 저장 스레드(합치기, 제한 시간 합류)·링크 가드(연쇄, 루프, root 거부)의 단위 테스트, 글리프 예산과 이중선이 오버레이에만 나타나는지에 대한 버퍼 테스트, 그리고 설정 테스트(주입한 홈 디렉터리, `docs/config.example.toml` 파싱)를 가진다.
+    - core crate는 디코더, flow tracker, 필터, 링, writer, 경보 엔진, 정찰 추적기(`RARE-DEST` 중복 제거 포함), IPC의 단위 테스트를 가지며, 바이너리 crate는 모든 보기를 영어와 한국어로 60x16, 100x30, 130x40에서 그리는 `TestBackend` 버퍼 테스트(포커스, 스크롤바, 선택 띠, 알림, 칩의 정확한 셀과 실제 마우스 이벤트를 통한 적중 영역), 길게 누름·드래그·놓침에 대한 시계 주입 테스트, 정렬 순환·열 폭 결정·분할 비율·상태 저장소·상태 저장 스레드(합치기, 제한 시간 합류)·링크 가드(연쇄, 루프, root 거부)의 단위 테스트, 글리프 예산과 이중선이 오버레이에만 나타나는지에 대한 버퍼 테스트, 탭 테스트(여섯 탭의 영어·한국어 렌더 매트릭스, 숫자·방향키·클릭 전환, 탭 드래그와 `<` / `>` 순서 변경의 `Esc` 복원), 출력 레벨 테스트(`level_of` 매핑, `passes` 필터, `tui.toml`의 `output_level`과 `capture_tab_order` 왕복), 그리고 설정 테스트(주입한 홈 디렉터리, `display.output_level` 파싱, `docs/config.example.toml` 파싱)를 가진다.
     - `monitor`, `ipc`, `inspector` 모듈은 Unix 타깃에서만 컴파일되고 실행되며, `notify`는 어디서나 컴파일되지만 OS 알림은 macOS와 Linux에서만 보낸다.

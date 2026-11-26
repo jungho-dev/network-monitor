@@ -1,5 +1,6 @@
 //! TUI state file `tui.toml` in the per-user folder next to `config.toml`:
-//! display language, card orders, split ratios, and column widths, restored
+//! display language, output level, capture tab order, card orders, split
+//! ratios, and column widths, restored
 //! at start and saved atomically on commit events.
 //!
 //! The file may be a symbolic link into a synced folder: a save resolves the
@@ -20,7 +21,9 @@ use super::cards::{CARD_COUNT, CardId, MAX_COLUMN_WIDTH, MAX_TABLE_COLUMNS};
 use super::i18n::{self, Lang, StateIssue};
 use super::interaction::{ToastLevel, Ui};
 use super::layout::{CardLayout, SplitGroup};
+use super::level::OutputLevel;
 use super::link_guard::{RootGuard, resolve_write_target, root_guard};
+use super::state::CaptureTab;
 use super::state_writer::{StateSave, StateWriter};
 
 pub const TUI_STATE_FILE_NAME: &str = "tui.toml";
@@ -46,6 +49,11 @@ struct StateFile {
     version: i64,
     #[serde(default)]
     language: Option<toml::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    output_level: Option<toml::Value>,
+    // Capture tab names in drawn order; restored only as a full permutation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    capture_tab_order: Option<toml::Value>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     orders: BTreeMap<String, Vec<i64>>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -66,10 +74,21 @@ fn build_state_file(
     layout: &CardLayout,
     column_widths: &[[Option<u16>; MAX_TABLE_COLUMNS]; CARD_COUNT],
     lang: Lang,
+    level_choice: Option<OutputLevel>,
+    tab_order: &[CaptureTab; 6],
 ) -> StateFile {
+    let capture_tab_order = (*tab_order != CaptureTab::ALL).then(|| {
+        let names = tab_order
+            .iter()
+            .map(|tab| toml::Value::String(tab.key().to_string()))
+            .collect();
+        toml::Value::Array(names)
+    });
     let mut file = StateFile {
         version: STATE_VERSION,
         language: Some(toml::Value::String(lang.code().to_string())),
+        output_level: level_choice.map(|level| toml::Value::String(level.code().to_string())),
+        capture_tab_order,
         ..StateFile::default()
     };
     for group in SplitGroup::ALL {
@@ -301,6 +320,33 @@ impl Ui {
                     Some(Some(lang)) => self.lang = lang,
                     Some(None) => skipped += 1,
                 }
+                match file
+                    .output_level
+                    .as_ref()
+                    .map(|value| value.as_str().and_then(OutputLevel::from_code))
+                {
+                    None => {}
+                    Some(Some(level)) => self.level_choice = Some(level),
+                    Some(None) => skipped += 1,
+                }
+                // Tab order: every name known and each tab exactly once.
+                let restore_order = |value: &toml::Value| -> Option<[CaptureTab; 6]> {
+                    let tabs: Vec<CaptureTab> = value
+                        .as_array()?
+                        .iter()
+                        .map(|name| name.as_str().and_then(CaptureTab::from_key))
+                        .collect::<Option<_>>()?;
+                    let order: [CaptureTab; 6] = tabs.try_into().ok()?;
+                    CaptureTab::ALL
+                        .iter()
+                        .all(|tab| order.contains(tab))
+                        .then_some(order)
+                };
+                match file.capture_tab_order.as_ref().map(restore_order) {
+                    None => {}
+                    Some(Some(order)) => self.tab_order = order,
+                    Some(None) => skipped += 1,
+                }
                 if skipped > 0 {
                     let text = i18n::state_entries_skipped(self.lang, TUI_STATE_FILE_NAME, skipped);
                     self.show_toast(&text, ToastLevel::Info);
@@ -318,7 +364,13 @@ impl Ui {
         let Some(path) = self.state_file.clone() else {
             return;
         };
-        let file = build_state_file(&self.layout, &self.column_widths, self.lang);
+        let file = build_state_file(
+            &self.layout,
+            &self.column_widths,
+            self.lang,
+            self.level_choice,
+            &self.tab_order,
+        );
         let queued = toml::to_string(&file)
             .map_err(|error| error.to_string())
             .and_then(|text| {
@@ -826,5 +878,99 @@ mod tests {
         write_state_atomic_with(&state, "version = 1\n", None).unwrap();
         assert_eq!(fs::read_to_string(&victim).unwrap(), "keep");
         assert_eq!(fs::read_to_string(&state).unwrap(), "version = 1\n");
+    }
+
+    #[test]
+    fn an_absent_output_level_leaves_no_choice_and_is_never_written_without_one() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join(TUI_STATE_FILE_NAME),
+            "version = 1\nlanguage = \"ko\"\n",
+        )
+        .unwrap();
+        let mut ui = ui_in(dir.path());
+        ui.load_state();
+        assert!(ui.toast.is_none(), "{:?}", ui.toast);
+        assert_eq!(ui.level_choice, None);
+        save_now(&mut ui);
+        let text = fs::read_to_string(dir.path().join(TUI_STATE_FILE_NAME)).unwrap();
+        assert!(!text.contains("output_level"), "{text}");
+    }
+
+    #[test]
+    fn a_saved_output_level_choice_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut saved = ui_in(dir.path());
+        saved.level_choice = Some(OutputLevel::Warn);
+        save_now(&mut saved);
+        let text = fs::read_to_string(dir.path().join(TUI_STATE_FILE_NAME)).unwrap();
+        assert!(text.contains("output_level = \"warn\""), "{text}");
+
+        let mut loaded = ui_in(dir.path());
+        loaded.load_state();
+        assert!(loaded.toast.is_none(), "{:?}", loaded.toast);
+        assert_eq!(loaded.level_choice, Some(OutputLevel::Warn));
+    }
+
+    #[test]
+    fn a_bad_output_level_is_skipped_alone_while_language_and_layout_load() {
+        for value in ["\"loud\"", "3"] {
+            let dir = tempfile::tempdir().unwrap();
+            let body = format!(
+                "version = 1\nlanguage = \"ko\"\noutput_level = {value}\n[orders]\ncapture_cols = [1, 0]\n"
+            );
+            fs::write(dir.path().join(TUI_STATE_FILE_NAME), body).unwrap();
+            let mut ui = ui_in(dir.path());
+            ui.load_state();
+            assert_eq!(ui.level_choice, None, "{value}");
+            assert_eq!(ui.lang, Lang::Ko, "{value}");
+            assert_eq!(
+                ui.layout.custom_order(SplitGroup::CaptureCols),
+                Some(vec![1, 0]),
+                "{value}"
+            );
+            let toast = ui.toast.as_ref().expect("skipped-entry toast");
+            assert!(toast.text.contains('1'), "{}", toast.text);
+        }
+    }
+
+    #[test]
+    fn capture_tab_order_round_trips_by_stable_names_and_is_absent_when_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut saved = ui_in(dir.path());
+        save_now(&mut saved);
+        let text = fs::read_to_string(dir.path().join(TUI_STATE_FILE_NAME)).unwrap();
+        assert!(!text.contains("capture_tab_order"), "{text}");
+
+        saved.tab_order.swap(0, 3);
+        save_now(&mut saved);
+        let text = fs::read_to_string(dir.path().join(TUI_STATE_FILE_NAME)).unwrap();
+        let expected = "capture_tab_order = [\"alerts\", \"flows\", \"stats\", \"packets\", \"stream\", \"settings\"]";
+        assert!(text.contains(expected), "{text}");
+
+        let mut loaded = ui_in(dir.path());
+        loaded.load_state();
+        assert!(loaded.toast.is_none(), "{:?}", loaded.toast);
+        assert_eq!(loaded.tab_order, saved.tab_order);
+    }
+
+    #[test]
+    fn a_partial_duplicate_or_unknown_capture_tab_order_is_skipped_alone() {
+        for broken in [
+            "[\"flows\", \"packets\"]",
+            "[\"flows\", \"flows\", \"stats\", \"alerts\", \"stream\", \"settings\"]",
+            "[\"flows\", \"packets\", \"stats\", \"alerts\", \"stream\", \"report\"]",
+            "\"flows\"",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let body = format!("version = 1\nlanguage = \"ko\"\ncapture_tab_order = {broken}\n");
+            fs::write(dir.path().join(TUI_STATE_FILE_NAME), body).unwrap();
+            let mut ui = ui_in(dir.path());
+            ui.load_state();
+            assert_eq!(ui.tab_order, CaptureTab::ALL, "{broken}");
+            assert_eq!(ui.lang, Lang::Ko, "{broken}");
+            let toast = ui.toast.as_ref().expect("skipped-entry toast");
+            assert!(toast.text.contains('1'), "{}", toast.text);
+        }
     }
 }

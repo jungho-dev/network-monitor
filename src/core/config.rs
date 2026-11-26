@@ -1,6 +1,7 @@
 //! Optional `config.toml` (capture defaults, display, and saved named filters).
 //! CLI arguments take precedence over config values.
 
+use crate::tui::level::OutputLevel;
 use network_monitor_core::app_dir::{app_dir_in, home_dir};
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -25,12 +26,14 @@ pub struct CaptureConfig {
 #[serde(default)]
 pub struct DisplayConfig {
     pub color_scheme: String,
+    pub output_level: Option<String>,
 }
 
 impl Default for DisplayConfig {
     fn default() -> Self {
         Self {
             color_scheme: "dark".into(),
+            output_level: None,
         }
     }
 }
@@ -55,6 +58,21 @@ impl Config {
             }),
             Err(_) => Self::default(),
         }
+    }
+
+    /// `display.output_level`: debug when absent; an unknown value is reported
+    /// on stderr once and falls back to debug.
+    pub fn output_level(&self) -> OutputLevel {
+        let Some(text) = self.display.output_level.as_deref() else {
+            return OutputLevel::Debug;
+        };
+        if let Some(level) = OutputLevel::from_code(text) {
+            return level;
+        }
+        eprintln!(
+            "network-monitor: ignoring unknown display.output_level \"{text}\" (expected debug, info, warn, or error)"
+        );
+        OutputLevel::Debug
     }
 }
 
@@ -103,5 +121,28 @@ mod tests {
         let home = tempfile::tempdir().expect("temp home");
         assert!(Config::load_in(None).capture.default_interface.is_none());
         assert!(Config::load_in(Some(home.path())).filters.is_empty());
+    }
+
+    #[test]
+    fn output_level_defaults_to_debug_and_reads_each_documented_value() {
+        assert_eq!(Config::default().output_level(), OutputLevel::Debug);
+        for (text, expected) in [
+            ("debug", OutputLevel::Debug),
+            ("info", OutputLevel::Info),
+            ("warn", OutputLevel::Warn),
+            ("error", OutputLevel::Error),
+        ] {
+            let config: Config = toml::from_str(&format!("[display]\noutput_level = \"{text}\"\n"))
+                .expect("config parses");
+            assert_eq!(config.output_level(), expected, "{text}");
+        }
+    }
+
+    #[test]
+    fn an_unknown_output_level_falls_back_to_debug() {
+        let config: Config =
+            toml::from_str("[display]\noutput_level = \"loud\"\n").expect("config parses");
+        assert_eq!(config.display.output_level.as_deref(), Some("loud"));
+        assert_eq!(config.output_level(), OutputLevel::Debug);
     }
 }

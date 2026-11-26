@@ -1,5 +1,6 @@
-//! Statistics views that replace the main area: top talkers, protocol shares,
-//! flows, the connection timeline, bookmarks, and the followed TCP stream.
+//! Statistics cards of the Flows, Stats, Alerts, and Stream tabs: top talkers,
+//! protocol shares, flows, the connection timeline, bookmarks, and the
+//! followed TCP stream.
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -10,7 +11,7 @@ use crate::tui::cards::CardId;
 use crate::tui::format::{fmt_bytes, fmt_count, stable_id};
 use crate::tui::i18n::{self, Msg};
 use crate::tui::sort::SortKey;
-use crate::tui::state::{App, OverlayKind};
+use crate::tui::state::App;
 use crate::tui::stats::printable;
 use crate::tui::theme;
 use crate::tui::views::common::{
@@ -19,17 +20,6 @@ use crate::tui::views::common::{
 };
 
 const TIMELINE_WIDTH: usize = 40;
-
-pub fn render_overlay(frame: &mut Frame, app: &mut App, area: Rect, kind: OverlayKind) {
-    match kind {
-        OverlayKind::TopTalkers => render_talkers(frame, app, area),
-        OverlayKind::ProtocolDist => render_protocols(frame, app, area),
-        OverlayKind::Flows => render_flows(frame, app, area),
-        OverlayKind::Timeline => render_timeline(frame, app, area),
-        OverlayKind::Stream => render_stream(frame, app, area),
-        OverlayKind::Bookmarks => render_bookmarks(frame, app, area),
-    }
-}
 
 // Sorts the rows, keeps the selection on the same item, and draws the card.
 fn render_stats_table(
@@ -49,7 +39,7 @@ fn render_stats_table(
     let table = CardTable {
         card,
         title,
-        hint: i18n::text(lang, Msg::HintCloseView).to_string(),
+        hint: i18n::text(lang, Msg::HintBackToPackets).to_string(),
         rows,
         total,
         offset: 0,
@@ -64,7 +54,7 @@ fn plain(text: String) -> Vec<Span<'static>> {
     vec![Span::raw(text)]
 }
 
-fn render_talkers(frame: &mut Frame, app: &mut App, area: Rect) {
+pub fn render_talkers(frame: &mut Frame, app: &mut App, area: Rect) {
     let lang = app.ui.lang;
     let rows: Vec<TableRow> = app
         .stats
@@ -90,7 +80,7 @@ fn render_talkers(frame: &mut Frame, app: &mut App, area: Rect) {
     render_stats_table(frame, app, area, CardId::StatTalkers, title, rows, empty);
 }
 
-fn render_protocols(frame: &mut Frame, app: &mut App, area: Rect) {
+pub fn render_protocols(frame: &mut Frame, app: &mut App, area: Rect) {
     let lang = app.ui.lang;
     let total: u64 = app.stats.protocols.iter().map(|row| row.count).sum();
     let rows: Vec<TableRow> = app
@@ -126,7 +116,7 @@ fn render_protocols(frame: &mut Frame, app: &mut App, area: Rect) {
     render_stats_table(frame, app, area, CardId::StatProtocols, title, rows, empty);
 }
 
-fn render_flows(frame: &mut Frame, app: &mut App, area: Rect) {
+pub fn render_flows(frame: &mut Frame, app: &mut App, area: Rect) {
     let lang = app.ui.lang;
     let rows: Vec<TableRow> = app
         .stats
@@ -159,7 +149,7 @@ fn render_flows(frame: &mut Frame, app: &mut App, area: Rect) {
     render_stats_table(frame, app, area, CardId::StatFlows, title, rows, empty);
 }
 
-fn render_bookmarks(frame: &mut Frame, app: &mut App, area: Rect) {
+pub fn render_bookmarks(frame: &mut Frame, app: &mut App, area: Rect) {
     let lang = app.ui.lang;
     let rows: Vec<TableRow> = app
         .stats
@@ -196,7 +186,7 @@ fn render_bookmarks(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 // Horizontal bars of each flow between the earliest start and the latest end.
-fn render_timeline(frame: &mut Frame, app: &mut App, area: Rect) {
+pub fn render_timeline(frame: &mut Frame, app: &mut App, area: Rect) {
     let lang = app.ui.lang;
     let mut flows: Vec<(&str, i64, i64)> = app
         .stats
@@ -225,7 +215,7 @@ fn render_timeline(frame: &mut Frame, app: &mut App, area: Rect) {
     let spec = TextCard {
         card: CardId::StatTimeline,
         title: i18n::text(lang, Msg::TitleTimeline).to_string(),
-        hint: i18n::text(lang, Msg::HintCloseView).to_string(),
+        hint: i18n::text(lang, Msg::HintBackToPackets).to_string(),
         lines,
         empty: empty_pair(lang, Msg::EmptyNoRows, Msg::EmptyWaitingHint),
     };
@@ -233,7 +223,7 @@ fn render_timeline(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 // Client lines first, then server lines, as printable text.
-fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
+pub fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
     let lang = app.ui.lang;
     let (title, lines) = match &app.stream {
         Some((title, data)) => {
@@ -260,14 +250,14 @@ fn render_stream(frame: &mut Frame, app: &mut App, area: Rect) {
                 lines,
             )
         }
-        None => (i18n::text(lang, Msg::EmptyNoStream).to_string(), Vec::new()),
+        None => (i18n::text(lang, Msg::TitleStream).to_string(), Vec::new()),
     };
     let spec = TextCard {
         card: CardId::StatStream,
         title,
-        hint: i18n::text(lang, Msg::HintCloseView).to_string(),
+        hint: i18n::text(lang, Msg::HintBackToPackets).to_string(),
         lines,
-        empty: empty_pair(lang, Msg::EmptyNoStream, Msg::EmptyNoRowsHint),
+        empty: empty_pair(lang, Msg::EmptyNoStream, Msg::EmptyNoStreamHint),
     };
     render_text_card(frame, &mut app.ui, area, spec);
 }

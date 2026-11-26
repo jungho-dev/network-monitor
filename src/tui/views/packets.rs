@@ -9,13 +9,14 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
-use network_monitor_core::analysis::{ThreatKind, analyze};
+use network_monitor_core::analysis::analyze;
 use network_monitor_core::decode::{
     ColorHint, DecodedPacket, Direction, DnsRdata, Layer, TlsHandshakeMessage,
 };
 
 use crate::tui::cards::CardId;
 use crate::tui::i18n::{self, Msg};
+use crate::tui::level::{OutputLevel, level_of};
 use crate::tui::state::App;
 use crate::tui::theme;
 use crate::tui::views::common::{
@@ -66,7 +67,7 @@ pub fn strip_leading_ports(info: &str) -> &str {
 
 // 2. packet list --------------------------------------------------------------
 // One display row: cells for every column plus the row style (selection,
-// threat, search, anomaly, retransmission, then direction tint).
+// search, then the output-level tone, then direction tint).
 fn packet_row(app: &App, visible_idx: usize, display_row: usize) -> Option<TableRow> {
     let packet = app.visible_packet(visible_idx)?;
     let selected = visible_idx == app.selected;
@@ -82,35 +83,27 @@ fn packet_row(app: &App, visible_idx: usize, display_row: usize) -> Option<Table
     } else {
         theme::BG_ZEBRA
     };
+    let level = level_of(
+        packet.threat.as_ref().map(|threat| threat.kind),
+        anomaly.as_ref().map(|found| found.severity),
+        packet.retransmission,
+    );
+    let direction_fg = match direction {
+        Direction::In => theme::DIR_IN,
+        Direction::Out => theme::DIR_OUT,
+        Direction::Unknown => theme::proto_color(packet.summary.color_hint),
+    };
+    let level_fg = match level {
+        OutputLevel::Error => theme::COLOR_CRIT,
+        OutputLevel::Warn => theme::TONE_WARN,
+        OutputLevel::Info | OutputLevel::Debug => direction_fg,
+    };
     let style = if selected {
         Style::default().bg(zebra)
-    } else if let Some(threat) = &packet.threat {
-        match threat.kind {
-            ThreatKind::RareExternal => Style::default()
-                .fg(theme::FG_ON_ACCENT)
-                .bg(theme::COLOR_ANOMALY)
-                .add_modifier(Modifier::BOLD),
-            _ => Style::default()
-                .fg(theme::FG_STRONG)
-                .bg(theme::COLOR_CRIT)
-                .add_modifier(Modifier::BOLD),
-        }
     } else if matches_search {
         theme::STYLE_SEARCH_ROW
-    } else if anomaly.is_some() {
-        Style::default()
-            .fg(theme::COLOR_ANOMALY)
-            .bg(zebra)
-            .add_modifier(Modifier::BOLD)
-    } else if packet.retransmission {
-        Style::default().fg(theme::COLOR_CRIT).bg(zebra)
     } else {
-        let fg = match direction {
-            Direction::In => theme::DIR_IN,
-            Direction::Out => theme::DIR_OUT,
-            Direction::Unknown => theme::proto_color(packet.summary.color_hint),
-        };
-        Style::default().fg(fg).bg(zebra)
+        Style::default().fg(level_fg).bg(zebra)
     };
 
     let time = packet.timestamp.format("%H:%M:%S%.3f").to_string();
@@ -219,11 +212,21 @@ pub fn render_packet_list(frame: &mut Frame, app: &mut App, area: Rect) {
     if shown_columns.iter().all(|on| !on) {
         shown_columns = [true; crate::tui::cards::MAX_TABLE_COLUMNS];
     }
-    let hint = match app.dir_filter {
+    let dir_hint = match app.dir_filter {
         Some(Direction::In) => i18n::text(lang, Msg::FilterInOnly),
         Some(Direction::Out) => i18n::text(lang, Msg::FilterOutOnly),
         _ => "",
     };
+    let min_level = app.ui.min_level();
+    let level_hint = if min_level > OutputLevel::Debug {
+        format!("{}+", min_level.code())
+    } else {
+        String::new()
+    };
+    let hint_parts: Vec<&str> = [dir_hint, level_hint.as_str()]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect();
     let empty = if app.packets.is_empty() && app.active_filter.is_none() {
         if app.paused {
             empty_pair(lang, Msg::EmptyPaused, Msg::EmptyPausedHint)
@@ -236,7 +239,7 @@ pub fn render_packet_list(frame: &mut Frame, app: &mut App, area: Rect) {
     let table = CardTable {
         card: CardId::PacketList,
         title: i18n::title_count(i18n::text(lang, Msg::TitlePackets), total),
-        hint: hint.to_string(),
+        hint: hint_parts.join(" · "),
         rows,
         total,
         offset: scroll,
@@ -621,6 +624,95 @@ pub fn format_hex_dump(data: &[u8]) -> Vec<Line<'static>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::test_support::{capture_app, draw, dump, tcp_packet};
+    use network_monitor_core::analysis::{ThreatAnnotation, ThreatKind};
+    use ratatui::buffer::Buffer;
+
+    fn threat_packet(number: u64, kind: ThreatKind) -> DecodedPacket {
+        let mut packet = tcp_packet(
+            number,
+            [10, 0, 0, 1],
+            40000,
+            [93, 184, 216, 9],
+            4444,
+            60,
+            b"",
+        );
+        packet.threat = Some(ThreatAnnotation {
+            kind,
+            detail: "test".to_string(),
+        });
+        packet
+    }
+
+    // An ordinary packet (selected, so the threat rows are not), then a
+    // rare-destination and a port-scan packet; no search.
+    fn threat_rows_app() -> App {
+        let mut app = capture_app();
+        app.packets.push(tcp_packet(
+            0,
+            [10, 0, 0, 1],
+            40000,
+            [93, 184, 216, 2],
+            443,
+            60,
+            b"",
+        ));
+        app.packets.push(threat_packet(1, ThreatKind::RareExternal));
+        app.packets.push(threat_packet(2, ThreatKind::PortScan));
+        app.follow = false;
+        app.selected = 0;
+        app
+    }
+
+    fn render_list(app: &mut App) -> Buffer {
+        draw(160, 8, |frame| {
+            let area = frame.area();
+            render_packet_list(frame, app, area);
+        })
+    }
+
+    // Checks the whole row's background, then the tag cells' foreground and weight.
+    fn assert_threat_row(buffer: &Buffer, tag: &str, fg: ratatui::style::Color) {
+        let rows = dump(buffer);
+        let (y, row) = rows
+            .iter()
+            .enumerate()
+            .find(|(_, row)| row.contains(tag))
+            .unwrap_or_else(|| panic!("no row with {tag}: {rows:#?}"));
+        let y = y as u16;
+        for x in 0..buffer.area.width {
+            let bg = buffer.cell((x, y)).expect("cell").bg;
+            assert!(
+                bg == theme::BG_PANEL || bg == theme::BG_ZEBRA,
+                "{tag} row cell {x} has bg {bg:?}"
+            );
+        }
+        let start = row[..row.find(tag).expect("tag")].chars().count() as u16;
+        for x in start..start + tag.chars().count() as u16 {
+            let cell = buffer.cell((x, y)).expect("cell");
+            assert_eq!(cell.fg, fg, "{tag} cell {x}");
+            assert!(!cell.modifier.contains(Modifier::BOLD), "{tag} cell {x}");
+        }
+    }
+
+    #[test]
+    fn threat_rows_use_a_toned_foreground_on_zebra_without_fill_or_bold() {
+        let mut app = threat_rows_app();
+        let buffer = render_list(&mut app);
+        assert_threat_row(&buffer, "! [RARE-DEST]", theme::TONE_WARN);
+        assert_threat_row(&buffer, "! [PORT-SCAN]", theme::COLOR_CRIT);
+    }
+
+    #[test]
+    fn the_list_title_shows_the_level_code_only_above_debug() {
+        let mut app = threat_rows_app();
+        let top = dump(&render_list(&mut app))[0].clone();
+        assert!(!top.contains('+'), "{top}");
+        app.ui.level_choice = Some(OutputLevel::Warn);
+        let top = dump(&render_list(&mut app))[0].clone();
+        assert!(top.contains("warn+"), "{top}");
+    }
 
     #[test]
     fn strips_tcp_udp_port_prefix() {

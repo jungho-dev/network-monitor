@@ -17,7 +17,9 @@ use super::cards::{
 use super::columns::card_sort_kinds;
 use super::i18n::{self, Lang, Msg};
 use super::layout::{CardLayout, SplitAxis, SplitDrag, SplitGroup};
+use super::level::OutputLevel;
 use super::sort::{Sort, SortChange, apply_change};
+use super::state::CaptureTab;
 
 // Lines per wheel notch, double-click window on a column edge, toast lifetime.
 const WHEEL_STEP: isize = 3;
@@ -63,6 +65,11 @@ pub type HoverSignature = (
 // 2. shared state -------------------------------------------------------------
 pub struct Ui {
     pub lang: Lang,
+    pub level_default: OutputLevel,
+    pub level_choice: Option<OutputLevel>,
+    // Capture tab-bar order (digits and Tab follow it); kept here so a save
+    // from either TUI writes it back. The inspector never reads it.
+    pub tab_order: [CaptureTab; 6],
     pub layout: CardLayout,
     pub column_widths: [[Option<u16>; MAX_TABLE_COLUMNS]; CARD_COUNT],
     pub sticky_widths: [[u16; MAX_TABLE_COLUMNS]; CARD_COUNT],
@@ -94,6 +101,9 @@ impl Ui {
     pub fn new(state_file: Option<PathBuf>) -> Self {
         Self {
             lang: Lang::default(),
+            level_default: OutputLevel::Debug,
+            level_choice: None,
+            tab_order: CaptureTab::ALL,
             layout: CardLayout::default(),
             column_widths: [[None; MAX_TABLE_COLUMNS]; CARD_COUNT],
             sticky_widths: [[0; MAX_TABLE_COLUMNS]; CARD_COUNT],
@@ -175,6 +185,14 @@ impl Ui {
 
     pub fn toggle_language(&mut self) {
         self.lang = self.lang.toggled();
+    }
+
+    pub fn min_level(&self) -> OutputLevel {
+        self.level_choice.unwrap_or(self.level_default)
+    }
+
+    pub fn cycle_level(&mut self) {
+        self.level_choice = Some(self.min_level().next());
     }
 
     // Default order, sizes, and column widths for the listed groups and cards;
@@ -1367,5 +1385,25 @@ mod tests {
         });
         assert!(ui.commit_drags());
         assert!(!ui.dragging());
+    }
+
+    #[test]
+    fn min_level_prefers_the_choice_and_cycle_level_wraps_from_error_to_debug() {
+        let mut ui = Ui::new(None);
+        assert_eq!(ui.min_level(), OutputLevel::Debug);
+        ui.level_default = OutputLevel::Info;
+        assert_eq!(ui.min_level(), OutputLevel::Info);
+        ui.cycle_level();
+        assert_eq!(ui.level_choice, Some(OutputLevel::Warn));
+        ui.level_choice = Some(OutputLevel::Error);
+        assert_eq!(ui.min_level(), OutputLevel::Error);
+        ui.cycle_level();
+        assert_eq!(ui.level_choice, Some(OutputLevel::Debug));
+        assert_eq!(ui.min_level(), OutputLevel::Debug);
+        ui.reset_layout(&SplitGroup::ALL, &CardId::ALL);
+        assert_eq!(
+            (ui.level_default, ui.level_choice),
+            (OutputLevel::Info, Some(OutputLevel::Debug))
+        );
     }
 }

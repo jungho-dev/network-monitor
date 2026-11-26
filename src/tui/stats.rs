@@ -5,8 +5,13 @@
 use std::collections::{BTreeMap, HashSet};
 use std::net::IpAddr;
 
+use chrono::{DateTime, Utc};
+
+use network_monitor_core::analysis::ThreatKind;
 use network_monitor_core::decode::{DecodedPacket, Layer};
 use network_monitor_core::flow::{ReassemblyBuffer, StreamData};
+
+use super::level::{OutputLevel, packet_level};
 
 // 1. cached rows --------------------------------------------------------------
 pub struct TalkerRow {
@@ -36,12 +41,20 @@ pub struct BookmarkRow {
     pub info: String,
 }
 
+pub struct ThreatRow {
+    pub time: DateTime<Utc>,
+    pub kind: ThreatKind,
+    pub number: u64,
+    pub detail: String,
+}
+
 #[derive(Default)]
 pub struct StatsCache {
     pub talkers: Vec<TalkerRow>,
     pub protocols: Vec<ProtocolRow>,
     pub flows: Vec<FlowRow>,
     pub bookmarks: Vec<BookmarkRow>,
+    pub threats: Vec<ThreatRow>,
 }
 
 // 2. aggregation --------------------------------------------------------------
@@ -76,17 +89,30 @@ pub fn five_tuple(packet: &DecodedPacket) -> Option<FiveTuple> {
     None
 }
 
-// One pass over the packets: talkers, flows, and bookmarked rows; protocol
-// counts come from the running totals the app keeps.
+// One pass over the packets: talkers, flows, bookmarked rows, and threat rows
+// at or above `min_level`; protocol counts come from the running totals the
+// app keeps.
 pub fn build_stats<'a>(
     packets: impl Iterator<Item = &'a DecodedPacket>,
     bookmarks: &HashSet<u64>,
     proto_counts: &BTreeMap<String, u64>,
+    min_level: OutputLevel,
 ) -> StatsCache {
     let mut talkers: BTreeMap<String, (u64, u64)> = BTreeMap::new();
     let mut flows: BTreeMap<String, FlowRow> = BTreeMap::new();
     let mut marked: Vec<BookmarkRow> = Vec::new();
+    let mut threats: Vec<ThreatRow> = Vec::new();
     for packet in packets {
+        if let Some(threat) = &packet.threat
+            && packet_level(packet) >= min_level
+        {
+            threats.push(ThreatRow {
+                time: packet.timestamp,
+                kind: threat.kind,
+                number: packet.number,
+                detail: threat.detail.clone(),
+            });
+        }
         for endpoint in [&packet.summary.source, &packet.summary.destination] {
             if endpoint.is_empty() {
                 continue;
@@ -149,6 +175,7 @@ pub fn build_stats<'a>(
             .collect(),
         flows: flows.into_values().collect(),
         bookmarks: marked,
+        threats,
     }
 }
 
@@ -254,7 +281,12 @@ mod tests {
         let reverse = tcp_packet(2, [93, 184, 216, 34], 443, [10, 0, 0, 1], 40000, 60, b"");
         let mut marks = HashSet::new();
         marks.insert(2);
-        let stats = build_stats([&forward, &reverse].into_iter(), &marks, &BTreeMap::new());
+        let stats = build_stats(
+            [&forward, &reverse].into_iter(),
+            &marks,
+            &BTreeMap::new(),
+            OutputLevel::Debug,
+        );
         assert_eq!(stats.flows.len(), 1);
         assert_eq!(stats.flows[0].packets, 2);
         assert_eq!(stats.flows[0].bytes, 160);

@@ -235,6 +235,41 @@ const BOOKMARK_COLUMNS: [ColumnDef; 4] = [
     column(Msg::ColInfo, 4, ColumnFit::Grow, LEFT, SortKind::Text, true),
 ];
 
+const THREAT_COLUMNS: [ColumnDef; 4] = [
+    column(
+        Msg::ColTime,
+        12,
+        ColumnFit::Fixed,
+        LEFT,
+        SortKind::Number,
+        false,
+    ),
+    column(
+        Msg::ColKind,
+        6,
+        ColumnFit::Shrink,
+        LEFT,
+        SortKind::Text,
+        false,
+    ),
+    column(
+        Msg::ColNo,
+        3,
+        ColumnFit::Fixed,
+        RIGHT,
+        SortKind::Number,
+        false,
+    ),
+    column(
+        Msg::ColDetail,
+        4,
+        ColumnFit::Grow,
+        LEFT,
+        SortKind::Text,
+        true,
+    ),
+];
+
 const CONN_COLUMNS: [ColumnDef; 6] = [
     column(
         Msg::ColProcess,
@@ -434,6 +469,7 @@ pub fn card_columns(card: CardId) -> &'static [ColumnDef] {
         CardId::StatProtocols => &PROTOCOL_COLUMNS,
         CardId::StatFlows => &FLOW_COLUMNS,
         CardId::StatBookmarks => &BOOKMARK_COLUMNS,
+        CardId::ThreatTable => &THREAT_COLUMNS,
         CardId::ConnTable => &CONN_COLUMNS,
         CardId::ProcTable => &PROC_COLUMNS,
         CardId::DomainTable => &DOMAIN_COLUMNS,

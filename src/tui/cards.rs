@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use ratatui::layout::{Position, Rect};
 
 use super::layout::{MAX_SLOTS, SplitGroup, SplitHit};
+use super::state::CaptureTab;
 
 pub const CARD_COUNT: usize = CardId::HistoryDetail as usize + 1;
 // Holding a card title this long enters move mode.
@@ -26,6 +27,8 @@ pub enum CardId {
     StatTimeline,
     StatStream,
     StatBookmarks,
+    ThreatTable,
+    SettingsList,
     ConnTable,
     ConnDetail,
     ProcTable,
@@ -49,6 +52,8 @@ impl CardId {
         CardId::StatTimeline,
         CardId::StatStream,
         CardId::StatBookmarks,
+        CardId::ThreatTable,
+        CardId::SettingsList,
         CardId::ConnTable,
         CardId::ConnDetail,
         CardId::ProcTable,
@@ -68,6 +73,8 @@ impl CardId {
             | Self::StatProtocols
             | Self::StatFlows
             | Self::StatBookmarks
+            | Self::ThreatTable
+            | Self::SettingsList
             | Self::ConnTable
             | Self::ProcTable
             | Self::DomainTable
@@ -82,6 +89,12 @@ impl CardId {
         match self {
             Self::PacketList => Some((SplitGroup::CaptureCols, 0)),
             Self::PacketDetail => Some((SplitGroup::CaptureCols, 1)),
+            Self::StatFlows => Some((SplitGroup::CaptureFlows, 0)),
+            Self::StatTimeline => Some((SplitGroup::CaptureFlows, 1)),
+            Self::StatTalkers => Some((SplitGroup::CaptureStats, 0)),
+            Self::StatProtocols => Some((SplitGroup::CaptureStats, 1)),
+            Self::ThreatTable => Some((SplitGroup::CaptureAlerts, 0)),
+            Self::StatBookmarks => Some((SplitGroup::CaptureAlerts, 1)),
             Self::ConnTable => Some((SplitGroup::InspectConn, 0)),
             Self::ConnDetail => Some((SplitGroup::InspectConn, 1)),
             Self::ProcTable => Some((SplitGroup::InspectProc, 0)),
@@ -104,6 +117,7 @@ impl CardId {
             Self::StatProtocols => Some(("stat_protocols", 4)),
             Self::StatFlows => Some(("stat_flows", 5)),
             Self::StatBookmarks => Some(("stat_bookmarks", 4)),
+            Self::ThreatTable => Some(("threat_table", 4)),
             Self::ConnTable => Some(("conn_table", 6)),
             Self::ProcTable => Some(("proc_table", 4)),
             Self::DomainTable => Some(("domain_table", 4)),
@@ -154,6 +168,7 @@ pub enum UiAction {
     Refresh,
     OpenSearch,
     ForceRestart,
+    CycleLevel,
 }
 
 // 3. hit areas ----------------------------------------------------------------
@@ -249,6 +264,8 @@ pub struct CardMove {
 #[derive(Debug, Default, Clone)]
 pub struct HitAreas {
     pub tab_rects: Vec<(usize, Rect)>,
+    // Capture tab bar: each drawn tab with its rect.
+    pub capture_tabs: Vec<(CaptureTab, Rect)>,
     pub button_rects: Vec<(UiAction, Rect)>,
     pub header_cells: Vec<HeaderHit>,
     pub column_hits: Vec<ColumnHit>,

@@ -9,11 +9,13 @@ pub mod i18n;
 pub mod interaction;
 pub mod layout;
 pub mod layout_store;
+pub mod level;
 pub mod link_guard;
 pub mod sort;
 pub mod state;
 pub mod state_writer;
 pub mod stats;
+pub mod tab_move;
 pub mod terminal;
 #[cfg(test)]
 pub mod test_support;
@@ -22,7 +24,7 @@ pub mod views;
 
 use std::collections::HashMap;
 use std::net::IpAddr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
@@ -39,6 +41,7 @@ use network_monitor_core::output::pcapng_writer::PcapngWriter;
 
 use crate::tui::capture_io::{PacketWriter, write_log_in};
 use crate::tui::layout_store::state_path_in;
+use crate::tui::level::OutputLevel;
 use crate::tui::state::{App, CaptureSource, Command, UiMessage};
 use crate::tui::state_writer::{StateWriter, spawn_state_writer};
 use crate::tui::terminal::{TuiHost, enter_terminal, run_event_loop};
@@ -107,14 +110,17 @@ impl TuiHost for CaptureHost {
         let hover_before = self.app.ui.hover_signature();
         let arranging_before = self.app.ui.arranging();
         let dragging_before = self.app.ui.dragging();
+        let tab_drag_before = self.app.tab_drag.is_some();
         let command = self.app.handle_mouse(mouse, now);
         self.dispatch(command);
         // A plain move redraws only when a hover target changed or a card move,
-        // long press, or drag was in progress (it may commit or cancel).
+        // long press, or drag (also a tab drag) was in progress (it may commit
+        // or cancel).
         mouse.kind != MouseEventKind::Moved
             || self.app.ui.hover_signature() != hover_before
             || arranging_before
             || dragging_before
+            || tab_drag_before
     }
 
     fn on_resize(&mut self) {
@@ -128,15 +134,27 @@ impl TuiHost for CaptureHost {
 }
 
 // 2. entry point --------------------------------------------------------------
-pub fn run_tui(
-    rx: Receiver<DecodedPacket>,
-    buffer_size: usize,
-    save_path: Option<&Path>,
-    saved_filters: HashMap<String, String>,
-    pcapng: bool,
-    local_ips: Vec<IpAddr>,
-    source: CaptureSource,
-) -> anyhow::Result<()> {
+pub struct CaptureOptions {
+    pub buffer_size: usize,
+    pub save_path: Option<PathBuf>,
+    pub saved_filters: HashMap<String, String>,
+    pub pcapng: bool,
+    pub local_ips: Vec<IpAddr>,
+    pub source: CaptureSource,
+    pub output_level: OutputLevel,
+}
+
+pub fn run_tui(rx: Receiver<DecodedPacket>, options: CaptureOptions) -> anyhow::Result<()> {
+    let CaptureOptions {
+        buffer_size,
+        save_path,
+        saved_filters,
+        pcapng,
+        local_ips,
+        source,
+        output_level,
+    } = options;
+
     // 1. state and the per-user state file (no home directory: state and log
     // saving are off, with one stderr line)
     let home = home_dir();
@@ -148,7 +166,9 @@ pub fn run_tui(
     let state_file = state_path_in(home.as_deref());
     let mut app = App::new(buffer_size, state_file, source);
     app.saved_filters = saved_filters;
+    app.threat_tracker.set_local_ips(&local_ips);
     app.local_ips = local_ips;
+    app.ui.level_default = output_level;
     app.ui.load_state();
 
     // 2. optional pcap writer on its own thread

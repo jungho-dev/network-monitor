@@ -8,7 +8,8 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::Receiver;
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use ratatui::layout::Position;
 
 use network_monitor_core::analysis::ThreatTracker;
 use network_monitor_core::decode::{DecodedPacket, Direction as PktDir};
@@ -24,8 +25,10 @@ use super::columns::PACKET_COLUMNS;
 use super::i18n::{self, Msg};
 use super::interaction::{MouseOutcome, ToastLevel, Ui};
 use super::layout::SplitGroup;
+use super::level::{OutputLevel, packet_level};
 use super::sort::{SortChange, SortKey, sorted_positions};
 use super::stats::{self, StatsCache};
+use super::tab_move::TabDrag;
 
 pub const COLUMN_COUNT: usize = PACKET_COLUMNS.len();
 const THROUGHPUT_WINDOW: usize = 60;
@@ -44,26 +47,79 @@ pub enum InputMode {
     ColumnConfig,
 }
 
+// Tabs of the capture screen, in the default tab-bar order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OverlayKind {
-    TopTalkers,
-    ProtocolDist,
+pub enum CaptureTab {
+    Packets,
     Flows,
-    Timeline,
+    Stats,
+    Alerts,
     Stream,
-    Bookmarks,
+    Settings,
 }
 
-impl OverlayKind {
-    pub fn card(self) -> CardId {
+impl CaptureTab {
+    pub const ALL: [CaptureTab; 6] = [
+        CaptureTab::Packets,
+        CaptureTab::Flows,
+        CaptureTab::Stats,
+        CaptureTab::Alerts,
+        CaptureTab::Stream,
+        CaptureTab::Settings,
+    ];
+
+    pub fn index(self) -> usize {
+        self as usize
+    }
+
+    // Card that takes the keys when the tab opens.
+    pub fn main_card(self) -> CardId {
         match self {
-            Self::TopTalkers => CardId::StatTalkers,
-            Self::ProtocolDist => CardId::StatProtocols,
+            Self::Packets => CardId::PacketList,
             Self::Flows => CardId::StatFlows,
-            Self::Timeline => CardId::StatTimeline,
+            Self::Stats => CardId::StatTalkers,
+            Self::Alerts => CardId::ThreatTable,
             Self::Stream => CardId::StatStream,
-            Self::Bookmarks => CardId::StatBookmarks,
+            Self::Settings => CardId::SettingsList,
         }
+    }
+
+    // Reorderable card group of the tab, if it has two cards.
+    pub fn group(self) -> Option<SplitGroup> {
+        match self {
+            Self::Packets => Some(SplitGroup::CaptureCols),
+            Self::Flows => Some(SplitGroup::CaptureFlows),
+            Self::Stats => Some(SplitGroup::CaptureStats),
+            Self::Alerts => Some(SplitGroup::CaptureAlerts),
+            Self::Stream | Self::Settings => None,
+        }
+    }
+
+    // Table cards whose column widths `l` resets on this tab.
+    pub fn table_cards(self) -> &'static [CardId] {
+        match self {
+            Self::Packets => &[CardId::PacketList],
+            Self::Flows => &[CardId::StatFlows],
+            Self::Stats => &[CardId::StatTalkers, CardId::StatProtocols],
+            Self::Alerts => &[CardId::ThreatTable, CardId::StatBookmarks],
+            Self::Stream | Self::Settings => &[],
+        }
+    }
+
+    // Stable name the state file stores (enum numbers are never written).
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Packets => "packets",
+            Self::Flows => "flows",
+            Self::Stats => "stats",
+            Self::Alerts => "alerts",
+            Self::Stream => "stream",
+            Self::Settings => "settings",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|tab| tab.key() == key)
     }
 }
 
@@ -112,7 +168,9 @@ pub struct App {
     pub search_query: String,
     pub search_re: Option<regex::Regex>,
     pub writer: Option<PacketWriter>,
-    pub overlay: Option<OverlayKind>,
+    pub tab: CaptureTab,
+    // An open tab press or drag (the order itself lives in `ui.tab_order`).
+    pub tab_drag: Option<TabDrag>,
     pub stream: Option<(String, network_monitor_core::flow::StreamData)>,
     pub throughput_pps: VecDeque<u64>,
     pub throughput_bps: VecDeque<u64>,
@@ -167,7 +225,8 @@ impl App {
             search_query: String::new(),
             search_re: None,
             writer: None,
-            overlay: None,
+            tab: CaptureTab::Packets,
+            tab_drag: None,
             stream: None,
             throughput_pps: VecDeque::new(),
             throughput_bps: VecDeque::new(),
@@ -216,7 +275,8 @@ impl App {
         self.visible_packet(self.selected)
     }
 
-    // Whether a packet passes both the text filter and the direction filter.
+    // Whether a packet passes the text filter, the direction filter, and the
+    // output level (the level pass is skipped at `debug`, which shows all).
     fn passes(&self, packet: &DecodedPacket) -> bool {
         let text_ok = self
             .active_filter
@@ -225,11 +285,16 @@ impl App {
         let dir_ok = self
             .dir_filter
             .is_none_or(|wanted| packet.direction(&self.local_ips) == wanted);
-        text_ok && dir_ok
+        let min_level = self.ui.min_level();
+        let level_ok = min_level == OutputLevel::Debug || packet_level(packet) >= min_level;
+        text_ok && dir_ok && level_ok
     }
 
     pub fn rebuild_filter_indices(&mut self) {
-        if self.active_filter.is_none() && self.dir_filter.is_none() {
+        if self.active_filter.is_none()
+            && self.dir_filter.is_none()
+            && self.ui.min_level() == OutputLevel::Debug
+        {
             self.filtered_indices = None;
         } else {
             let indices: Vec<usize> = (0..self.packets.len())
@@ -347,7 +412,10 @@ impl App {
     }
 
     pub fn refresh_stats(&mut self, now: Instant) {
-        if matches!(self.overlay, None | Some(OverlayKind::Stream)) {
+        if !matches!(
+            self.tab,
+            CaptureTab::Flows | CaptureTab::Stats | CaptureTab::Alerts
+        ) {
             return;
         }
         let due = self
@@ -356,7 +424,12 @@ impl App {
         if !self.stats_dirty && !due {
             return;
         }
-        self.stats = stats::build_stats(self.packets.iter(), &self.bookmarks, &self.proto_counts);
+        self.stats = stats::build_stats(
+            self.packets.iter(),
+            &self.bookmarks,
+            &self.proto_counts,
+            self.ui.min_level(),
+        );
         self.stats_dirty = false;
         self.stats_built = Some(now);
     }
@@ -405,6 +478,11 @@ impl App {
 
     // 6. packets in -----------------------------------------------------------
     pub fn drain_packets(&mut self, rx: &Receiver<DecodedPacket>, now: Instant) {
+        // A level above debug restored from the state file needs the visible
+        // index list before the first packet is placed.
+        if self.filtered_indices.is_none() && self.ui.min_level() != OutputLevel::Debug {
+            self.rebuild_filter_indices();
+        }
         let mut arrived = false;
         // Visible rows the ring pushed out of the front during this batch.
         let mut evicted_visible = 0usize;
@@ -559,23 +637,34 @@ impl App {
         }
     }
 
-    fn toggle_overlay(&mut self, kind: OverlayKind) {
-        self.overlay = if self.overlay == Some(kind) {
-            None
-        } else {
-            self.stats_dirty = true;
-            Some(kind)
-        };
-        self.sync_default_focus();
-    }
-
-    // The overlay card takes the keys while a statistics view is open.
-    pub fn sync_default_focus(&mut self) {
-        self.ui.default_focus = self.overlay.map_or(CardId::PacketList, OverlayKind::card);
+    // Clears any card move, commits a drag that had moved (its release may
+    // never arrive once the tab changes, so it is saved now), gives the keys to
+    // the tab's main card, and asks for fresh statistics on a statistics tab.
+    pub fn switch_tab(&mut self, tab: CaptureTab) -> Command {
+        self.ui.cancel_card_move();
+        let drag_moved = self.ui.commit_drags();
+        // The input row lives on the Packets tab: leaving it ends any input.
+        if tab != CaptureTab::Packets {
+            self.mode = InputMode::Normal;
+        }
+        self.tab = tab;
+        self.ui.context = tab.index();
+        self.ui.default_focus = tab.main_card();
         self.ui.focus = None;
+        if matches!(
+            tab,
+            CaptureTab::Flows | CaptureTab::Stats | CaptureTab::Alerts
+        ) {
+            self.stats_dirty = true;
+        }
+        if drag_moved {
+            Command::SaveState
+        } else {
+            Command::None
+        }
     }
 
-    fn open_stream(&mut self) {
+    fn open_stream(&mut self) -> Command {
         let built = self.selected_packet().and_then(|selected| {
             let packets = self.packets.iter();
             stats::build_stream(selected, packets)
@@ -585,10 +674,12 @@ impl App {
                 let (client, server) = (stream.client, stream.server);
                 let title = format!("{}:{} <-> {}:{}", client.0, client.1, server.0, server.1);
                 self.stream = Some((title, stream.data));
-                self.overlay = Some(OverlayKind::Stream);
-                self.sync_default_focus();
+                self.switch_tab(CaptureTab::Stream)
             }
-            None => self.toast(Msg::ToastSelectTcp, ToastLevel::Error),
+            None => {
+                self.toast(Msg::ToastSelectTcp, ToastLevel::Error);
+                Command::None
+            }
         }
     }
 
@@ -654,15 +745,27 @@ impl App {
                 Command::SaveState
             }
             UiAction::ResetLayout => {
-                let mut cards = vec![CardId::PacketList];
-                cards.extend([
-                    CardId::StatTalkers,
-                    CardId::StatProtocols,
-                    CardId::StatFlows,
-                    CardId::StatBookmarks,
-                ]);
-                self.ui
-                    .reset_layout(&[SplitGroup::CaptureRows, SplitGroup::CaptureCols], &cards);
+                // Order, sizes, and column widths of the current tab only; the
+                // hex pane split belongs to the Packets tab as well.
+                let tab = self.tab;
+                let mut groups: Vec<SplitGroup> = tab.group().into_iter().collect();
+                if tab == CaptureTab::Packets {
+                    groups.push(SplitGroup::CaptureRows);
+                }
+                self.ui.reset_layout(&groups, tab.table_cards());
+                Command::SaveState
+            }
+            UiAction::CycleLevel => {
+                self.ui.cycle_level();
+                self.rebuild_filter_indices();
+                let count = self.visible_count();
+                self.selected = if self.follow {
+                    count.saturating_sub(1)
+                } else {
+                    0
+                };
+                let text = i18n::output_level_set(self.ui.lang, self.ui.min_level().code());
+                self.ui.show_toast(&text, ToastLevel::Info);
                 Command::SaveState
             }
             UiAction::TogglePause => {
@@ -675,20 +778,24 @@ impl App {
                 self.toast(msg, ToastLevel::Info);
                 Command::None
             }
+            // Input modes draw their row on the Packets tab, so they open it first.
             UiAction::OpenFilter => {
+                let command = self.switch_tab(CaptureTab::Packets);
                 self.mode = InputMode::FilterInput;
                 self.filter_input.clear();
                 self.filter_cursor = 0;
-                Command::None
+                command
             }
             UiAction::OpenSearch => {
+                let command = self.switch_tab(CaptureTab::Packets);
                 self.mode = InputMode::Search;
                 self.search_query.clear();
-                Command::None
+                command
             }
             UiAction::OpenColumns => {
+                let command = self.switch_tab(CaptureTab::Packets);
                 self.mode = InputMode::ColumnConfig;
-                Command::None
+                command
             }
             UiAction::SaveLog => {
                 if self.visible_count() == 0 {
@@ -711,13 +818,24 @@ impl App {
             return Command::None;
         }
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('f') {
-            self.mode = InputMode::Search;
-            self.search_query.clear();
-            return Command::None;
+            return self.perform_action(UiAction::OpenSearch);
         }
         // Help closes on any key; a card move or pending press only takes Esc.
         if self.ui.show_help {
             self.ui.show_help = false;
+            return Command::None;
+        }
+        // Unmoved tab press ends; a moved tab drag takes only Esc.
+        if self
+            .tab_drag
+            .is_some_and(|drag| drag.baseline == self.ui.tab_order)
+        {
+            self.tab_drag = None;
+        }
+        if self.tab_drag.is_some() {
+            if key.code == KeyCode::Esc {
+                self.cancel_tab_drag();
+            }
             return Command::None;
         }
         if self.ui.card_move.is_some() || self.ui.card_press.is_some() {
@@ -746,28 +864,41 @@ impl App {
     fn handle_normal_key(&mut self, key: KeyEvent) -> Command {
         let card = self.ui.focused_card();
         let shifted = key.modifiers.contains(KeyModifiers::SHIFT);
+        let slot = self
+            .ui
+            .tab_order
+            .iter()
+            .position(|tab| *tab == self.tab)
+            .unwrap_or(0);
+        let count = self.ui.tab_order.len();
+        let previous = self.ui.tab_order[(slot + count - 1) % count];
+        let next = self.ui.tab_order[(slot + 1) % count];
         match key.code {
             KeyCode::Char('q') => self.perform_action(UiAction::Quit),
-            KeyCode::Esc => {
-                if self.overlay.is_some() {
-                    self.overlay = None;
-                    self.stream = None;
-                    self.sync_default_focus();
-                    Command::None
-                } else {
-                    self.perform_action(UiAction::Quit)
-                }
-            }
+            KeyCode::Esc if self.tab != CaptureTab::Packets => self.switch_tab(CaptureTab::Packets),
+            KeyCode::Esc => self.perform_action(UiAction::Quit),
             KeyCode::Char('?') => self.perform_action(UiAction::ShowHelp),
-            KeyCode::BackTab => {
-                self.ui.cycle_focus(-1);
-                Command::None
+            KeyCode::BackTab => self.switch_tab(previous),
+            KeyCode::Tab if shifted => self.switch_tab(previous),
+            KeyCode::Tab => self.switch_tab(next),
+            KeyCode::Left if !shifted => self.switch_tab(previous),
+            KeyCode::Right if !shifted => self.switch_tab(next),
+            KeyCode::Char(digit @ '1'..='6') => {
+                self.switch_tab(self.ui.tab_order[digit as usize - '1' as usize])
             }
-            KeyCode::Tab if shifted => {
-                self.ui.cycle_focus(-1);
-                Command::None
+            KeyCode::Char('<') => self.move_active_tab(-1),
+            KeyCode::Char('>') => self.move_active_tab(1),
+            KeyCode::Enter if self.tab == CaptureTab::Settings => {
+                // Row 0 is the output level, row 1 the language.
+                let action = if self.ui.views[CardId::SettingsList as usize].selected == 0 {
+                    UiAction::CycleLevel
+                } else {
+                    UiAction::ToggleLanguage
+                };
+                self.perform_action(action)
             }
-            KeyCode::Tab => {
+            KeyCode::Enter => {
+                // Keyboard path between the cards of the tab.
                 self.ui.cycle_focus(1);
                 Command::None
             }
@@ -798,30 +929,11 @@ impl App {
                 self.change_sort(target, change);
                 Command::None
             }
-            KeyCode::Char('t') => {
-                self.toggle_overlay(OverlayKind::TopTalkers);
-                Command::None
-            }
-            KeyCode::Char('P') => {
-                self.toggle_overlay(OverlayKind::ProtocolDist);
-                Command::None
-            }
-            KeyCode::Char('F') => {
-                self.toggle_overlay(OverlayKind::Flows);
-                Command::None
-            }
-            KeyCode::Char('T') => {
-                self.toggle_overlay(OverlayKind::Timeline);
-                Command::None
-            }
-            KeyCode::Char('\'') => {
-                self.toggle_overlay(OverlayKind::Bookmarks);
-                Command::None
-            }
-            KeyCode::Char('f') => {
-                self.open_stream();
-                Command::None
-            }
+            KeyCode::Char('t' | 'P') => self.switch_tab(CaptureTab::Stats),
+            KeyCode::Char('F' | 'T') => self.switch_tab(CaptureTab::Flows),
+            KeyCode::Char('\'') => self.switch_tab(CaptureTab::Alerts),
+            KeyCode::Char('f') => self.open_stream(),
+            KeyCode::Char('v') => self.perform_action(UiAction::CycleLevel),
             KeyCode::Char('m') => {
                 self.toggle_bookmark();
                 Command::None
@@ -977,11 +1089,44 @@ impl App {
 
     // 10. mouse ---------------------------------------------------------------
     pub fn handle_mouse(&mut self, mouse: MouseEvent, now: Instant) -> Command {
+        // 1. open tab drag: preview on drag, commit on release
+        if self.tab_drag.is_some() && mouse.kind == MouseEventKind::Drag(MouseButton::Left) {
+            self.preview_tab_move(Position::new(mouse.column, mouse.row));
+            return Command::None;
+        }
+        if self.tab_drag.is_some() && mouse.kind == MouseEventKind::Up(MouseButton::Left) {
+            return if self.finish_tab_drag() {
+                Command::SaveState
+            } else {
+                Command::None
+            };
+        }
+
+        // 2. lost release (buttonless move or new press) commits a moved drag
+        let lost_release = matches!(
+            mouse.kind,
+            MouseEventKind::Moved | MouseEventKind::Down(MouseButton::Left)
+        );
+        if lost_release && self.finish_tab_drag() {
+            return Command::SaveState;
+        }
+
+        // 3. shared outcome; a tab press switches and opens a tab drag
         match self.ui.handle_mouse(mouse, now) {
             MouseOutcome::None => Command::None,
             MouseOutcome::SaveState => Command::SaveState,
             MouseOutcome::Action(action) => self.perform_action(action),
-            MouseOutcome::Tab(_) => Command::None,
+            MouseOutcome::Tab(index) => {
+                let Some(tab) = self.ui.tab_order.get(index).copied() else {
+                    return Command::None;
+                };
+                let command = self.switch_tab(tab);
+                self.tab_drag = Some(TabDrag {
+                    tab,
+                    baseline: self.ui.tab_order,
+                });
+                command
+            }
             MouseOutcome::Header { card, column } => {
                 self.change_sort(card, SortChange::SelectColumn(column));
                 Command::None
@@ -1002,8 +1147,10 @@ impl App {
         }
     }
 
+    // A tab drag that already moved the order commits like a lost release.
     pub fn handle_resize(&mut self) -> Command {
-        if self.ui.handle_resize() {
+        let tab_moved = self.finish_tab_drag();
+        if self.ui.handle_resize() || tab_moved {
             Command::SaveState
         } else {
             Command::None
@@ -1038,9 +1185,10 @@ fn next_char_width(text: &str, at: usize) -> usize {
 mod tests {
     use super::*;
     use crate::tui::test_support::{
-        blank_packet, capture_app, key, populate, shift_key, tcp_packet,
+        blank_packet, capture_app, key, populate, shift_key, tcp_packet, threat_packet,
     };
     use crossterm::event::{KeyEventKind, MouseButton, MouseEventKind};
+    use network_monitor_core::analysis::ThreatKind;
 
     #[test]
     fn release_events_are_ignored_so_a_toggle_sticks() {
@@ -1091,7 +1239,7 @@ mod tests {
     }
 
     #[test]
-    fn q_esc_and_ctrl_c_quit_while_esc_first_closes_an_overlay() {
+    fn q_esc_and_ctrl_c_quit_on_packets_while_esc_on_another_tab_returns_to_packets() {
         for quit in [
             key(KeyCode::Char('q')),
             key(KeyCode::Esc),
@@ -1103,21 +1251,126 @@ mod tests {
         }
         let mut app = capture_app();
         app.handle_key(key(KeyCode::Char('t')));
-        assert_eq!(app.overlay, Some(OverlayKind::TopTalkers));
+        assert_eq!(app.tab, CaptureTab::Stats);
         assert_eq!(app.ui.default_focus, CardId::StatTalkers);
         app.handle_key(key(KeyCode::Esc));
-        assert!(app.overlay.is_none() && !app.should_quit);
+        assert!(app.tab == CaptureTab::Packets && !app.should_quit);
         assert_eq!(app.ui.default_focus, CardId::PacketList);
+        for (letter, tab) in [
+            ('P', CaptureTab::Stats),
+            ('F', CaptureTab::Flows),
+            ('T', CaptureTab::Flows),
+            ('\'', CaptureTab::Alerts),
+        ] {
+            app.handle_key(key(KeyCode::Char(letter)));
+            assert_eq!(app.tab, tab, "{letter}");
+        }
     }
 
     #[test]
-    fn help_swallows_one_key_and_a_press_toggles_overlays_once() {
+    fn help_swallows_one_key_so_the_closing_key_does_not_switch_tabs() {
         let mut app = capture_app();
         app.handle_key(key(KeyCode::Char('?')));
         assert!(app.ui.show_help);
         app.handle_key(key(KeyCode::Char('t')));
         assert!(!app.ui.show_help);
-        assert!(app.overlay.is_none(), "the closing key is consumed");
+        assert_eq!(app.tab, CaptureTab::Packets, "the closing key is consumed");
+    }
+
+    #[test]
+    fn v_cycles_the_output_level_and_the_list_keeps_only_packets_at_or_above_it() {
+        let mut app = capture_app();
+        let info = tcp_packet(
+            1,
+            [10, 0, 0, 1],
+            40000,
+            [93, 184, 216, 34],
+            9000,
+            80,
+            b"GET / HTTP/1.1\r\nHost: example\r\n\r\n",
+        );
+        let mut retransmitted =
+            tcp_packet(2, [10, 0, 0, 1], 40000, [93, 184, 216, 34], 443, 60, b"");
+        retransmitted.retransmission = true;
+        let fixtures = [
+            blank_packet(0),
+            info,
+            retransmitted,
+            threat_packet(3, ThreatKind::PortScan),
+        ];
+        let levels: Vec<OutputLevel> = fixtures.iter().map(packet_level).collect();
+        assert_eq!(levels, OutputLevel::ALL, "one fixture per level");
+        for packet in fixtures {
+            app.packets.push(packet);
+        }
+        for expected in [OutputLevel::Info, OutputLevel::Warn, OutputLevel::Error] {
+            assert_eq!(app.handle_key(key(KeyCode::Char('v'))), Command::SaveState);
+            assert_eq!(app.ui.min_level(), expected);
+            let shown: Vec<OutputLevel> = (0..app.visible_count())
+                .map(|index| packet_level(app.visible_packet(index).unwrap()))
+                .collect();
+            assert_eq!(shown.len(), 4 - expected as usize, "{expected:?}");
+            assert!(shown.iter().all(|level| *level >= expected), "{shown:?}");
+        }
+        let exported = app.visible_packets_cloned();
+        assert_eq!(exported.len(), 1, "the log export holds only error packets");
+        assert_eq!(exported[0].number, 3);
+        assert_eq!(
+            app.ui.toast.as_ref().map(|toast| toast.text.as_str()),
+            Some("Output level: error+")
+        );
+        assert_eq!(app.handle_key(key(KeyCode::Char('v'))), Command::SaveState);
+        assert_eq!(app.ui.min_level(), OutputLevel::Debug);
+        assert!(app.filtered_indices.is_none());
+        assert_eq!(app.visible_count(), 4);
+    }
+
+    #[test]
+    fn a_level_restored_from_the_state_file_filters_the_first_drained_packets() {
+        let mut app = capture_app();
+        app.ui.level_choice = Some(OutputLevel::Warn);
+        let (tx, rx) = crossbeam_channel::unbounded();
+        // The drain re-annotates threats through the tracker, so the warn
+        // packet is a retransmission.
+        let mut retransmitted =
+            tcp_packet(1, [10, 0, 0, 1], 40000, [93, 184, 216, 34], 443, 60, b"");
+        retransmitted.retransmission = true;
+        tx.send(blank_packet(0)).unwrap();
+        tx.send(retransmitted).unwrap();
+        app.drain_packets(&rx, Instant::now());
+        assert_eq!(app.packets.len(), 2);
+        assert_eq!(app.visible_count(), 1);
+        assert_eq!(app.selected_packet().map(|packet| packet.number), Some(1));
+    }
+
+    #[test]
+    fn l_on_the_flows_tab_resets_only_the_flows_group_and_its_table() {
+        let mut app = capture_app();
+        app.ui.level_choice = Some(OutputLevel::Warn);
+        assert!(
+            app.ui
+                .layout
+                .restore_ratios(SplitGroup::CaptureFlows, &[3_000])
+        );
+        assert!(
+            app.ui
+                .layout
+                .restore_ratios(SplitGroup::CaptureCols, &[3_000])
+        );
+        app.ui.column_widths[CardId::StatFlows as usize][0] = Some(20);
+        app.ui.column_widths[CardId::PacketList as usize][0] = Some(20);
+        app.handle_key(key(KeyCode::Char('2')));
+        assert_eq!(app.tab, CaptureTab::Flows);
+        assert_eq!(app.handle_key(key(KeyCode::Char('l'))), Command::SaveState);
+        assert!(!app.ui.layout.has_custom_groups(&[SplitGroup::CaptureFlows]));
+        assert!(app.ui.layout.has_custom_groups(&[SplitGroup::CaptureCols]));
+        assert_eq!(app.ui.column_widths[CardId::StatFlows as usize][0], None);
+        assert_eq!(
+            app.ui.column_widths[CardId::PacketList as usize][0],
+            Some(20)
+        );
+        assert_eq!(app.ui.level_choice, Some(OutputLevel::Warn));
+        assert_eq!(app.ui.lang, i18n::Lang::En);
     }
 
     #[test]
@@ -1269,7 +1522,7 @@ mod tests {
     }
 
     #[test]
-    fn tab_cycles_focus_between_drawn_cards_and_shift_arrows_reorder() {
+    fn enter_cycles_focus_between_drawn_cards_and_shift_arrows_reorder() {
         let mut app = capture_app();
         let list = ratatui::layout::Rect::new(0, 2, 40, 10);
         let detail = ratatui::layout::Rect::new(41, 2, 39, 10);
@@ -1281,10 +1534,11 @@ mod tests {
                 group: SplitGroup::CaptureCols,
                 slots: vec![list, detail],
             });
-        app.handle_key(key(KeyCode::Tab));
+        app.handle_key(key(KeyCode::Enter));
         assert_eq!(app.ui.focused_card(), CardId::PacketDetail);
-        app.handle_key(key(KeyCode::BackTab));
+        app.handle_key(key(KeyCode::Enter));
         assert_eq!(app.ui.focused_card(), CardId::PacketList);
+        assert_eq!(app.tab, CaptureTab::Packets, "Enter never switches tabs");
         assert_eq!(
             app.handle_key(shift_key(KeyCode::Right)),
             Command::SaveState
@@ -1501,5 +1755,59 @@ mod tests {
         app.drain_packets(&rx, start + Duration::from_millis(20));
         assert_eq!(app.selected, 0);
         assert_eq!(app.selected_packet().unwrap().summary.length, 25);
+    }
+
+    #[test]
+    fn angle_bracket_keys_move_the_active_tab_one_slot_stop_at_the_ends_and_skip_input_modes() {
+        let mut app = capture_app();
+        assert_eq!(app.handle_key(key(KeyCode::Char('<'))), Command::None);
+        assert_eq!(app.handle_key(key(KeyCode::Char('>'))), Command::SaveState);
+        assert_eq!(
+            app.ui.tab_order[..2],
+            [CaptureTab::Flows, CaptureTab::Packets]
+        );
+        assert_eq!(app.tab, CaptureTab::Packets, "the active tab stays");
+        assert_eq!(
+            app.ui.toast.as_ref().map(|toast| toast.text.as_str()),
+            Some("Tab order changed")
+        );
+        assert_eq!(app.handle_key(key(KeyCode::Char('<'))), Command::SaveState);
+        assert_eq!(app.ui.tab_order, CaptureTab::ALL);
+        app.switch_tab(CaptureTab::Settings);
+        assert_eq!(app.handle_key(key(KeyCode::Char('>'))), Command::None);
+        assert_eq!(app.ui.tab_order, CaptureTab::ALL);
+        for mode in [
+            InputMode::FilterInput,
+            InputMode::Search,
+            InputMode::ColumnConfig,
+        ] {
+            app.switch_tab(CaptureTab::Flows);
+            app.mode = mode;
+            app.handle_key(key(KeyCode::Char('<')));
+            app.handle_key(key(KeyCode::Char('>')));
+            assert_eq!(app.ui.tab_order, CaptureTab::ALL, "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn input_keys_on_another_tab_open_the_packets_tab_and_leaving_it_ends_input() {
+        let mut app = capture_app();
+        for (code, ctrl, mode) in [
+            (KeyCode::Char('/'), false, InputMode::FilterInput),
+            (KeyCode::Char('f'), true, InputMode::Search),
+            (KeyCode::Char('c'), false, InputMode::ColumnConfig),
+        ] {
+            app.switch_tab(CaptureTab::Stats);
+            let event = if ctrl {
+                KeyEvent::new(code, KeyModifiers::CONTROL)
+            } else {
+                key(code)
+            };
+            app.handle_key(event);
+            assert_eq!(app.tab, CaptureTab::Packets, "{mode:?}");
+            assert_eq!(app.mode, mode);
+            app.switch_tab(CaptureTab::Alerts);
+            assert_eq!(app.mode, InputMode::Normal, "{mode:?}");
+        }
     }
 }

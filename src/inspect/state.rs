@@ -551,7 +551,8 @@ impl Inspect {
             UiAction::TogglePause
             | UiAction::OpenFilter
             | UiAction::OpenColumns
-            | UiAction::SaveLog => Command::None,
+            | UiAction::SaveLog
+            | UiAction::CycleLevel => Command::None,
         }
     }
 

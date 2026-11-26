@@ -128,7 +128,9 @@ On Windows run the same commands without sudo from an Administrator prompt
 ```
 
 3. **Read the screen**
-    - From top to bottom: the app bar (interface or file, capture state, counters), the filter bar, the packet list (Time, Dir, Process, Host, IP, Proto, Len, Info) with the detail card beside it, the hex card, the throughput strip, and the footer chips with a hint row.
+    - From top to bottom: the app bar (interface or file, capture state, counters), the tab bar (Packets, Flows, Stats, Alerts, Stream, Settings), the tab body, and the footer chips with a hint row.
+    - The Packets tab holds the filter bar, the packet list (Time, Dir, Process, Host, IP, Proto, Len, Info) with the detail card beside it, the hex card, and the throughput strip.
+    - Press `1` to `6` or `Tab` to switch tabs, and `v` to raise the output level (`debug`, `info`, `warn`, `error`) so only warnings and errors stay in the list.
     - The app bar shows `LIVE`, `BROWSE`, or `PAUSED`, the packet and dropped counters, and a freshness dot.
     - Press `/` to filter, `Space` to pause, `w` to save the visible packets as a log file, `L` to switch the display language, `?` for every key, and `q` to quit. Full key list: Keybindings; screen behavior: Terminal UI.
 4. **Try it without privileges**
@@ -178,12 +180,13 @@ sudo network-monitor monitor run -i en0 \
 1. **Packet analyzer**
     - Live capture from any interface with a BPF filter, and PCAP or PCAPNG save (`-w`, `--pcapng`).
     - Decoders: Ethernet, ARP, IPv4/IPv6, TCP, UDP, ICMP/ICMPv6, DNS (questions and answers), TLS (SNI plus JA3/JA4 fingerprints), HTTP/1.1, cleartext HTTP/2 (HPACK), QUIC long-header detection.
-    - TCP stream reassembly with the follow-stream overlay (`f`) and RTT estimation.
-    - Overlays: top talkers (`t`), protocol distribution (`P`), flows (`F`), connection timeline (`T`), bookmarks (`'`); a live throughput strip is always visible.
+    - TCP stream reassembly with RTT estimation; `f` opens the stream of the selected TCP packet in the Stream tab.
+    - Six tabs in the default order (`1` to `6`): Packets (packet list, detail tree, hex dump, filter row, throughput strip), Flows (flows over the connection timeline), Stats (top talkers beside the protocol distribution), Alerts (threat alert table over bookmarks), Stream (follow-stream of the TCP stream opened with `f`), and Settings (output level and language); the tab order can be changed.
     - Regex search (`Ctrl-F`), bookmarks (`m`), inbound/outbound views (`i`, `o`), per-column visibility (`c`), and sortable tables with draggable columns (`s`, `S`, header click).
     - Mouse, display language (`L`), card arrangement, and a saved layout: see Terminal UI.
     - Cleartext warnings in the packet list: HTTP Basic credentials, an FTP `PASS`, and cleartext HTTP on an unusual port.
-    - Live recon heuristics that tag packets and match the `threat` filter: `PORT-SCAN` (15 or more distinct ports on one host within 10 seconds), `HOST-SWEEP` (12 or more distinct hosts within 10 seconds), and `RARE-DEST` (cleartext to an uncommon port on a public host).
+    - Live recon heuristics that tag packets and match the `threat` filter: `PORT-SCAN` (15 or more distinct ports on one host within 10 seconds), `HOST-SWEEP` (12 or more distinct hosts within 10 seconds), and `RARE-DEST` (a connection attempt or cleartext data to an uncommon port on a public host, tagged once per source, destination, and destination port within 60 seconds; never on traffic into a local address, on replies from a common service port to an ephemeral port, on segments without data, or on encrypted payloads such as TLS records and QUIC).
+    - Output level (`v`, the Settings tab, or `[display] output_level`): `debug` (the default, shows everything), `info`, `warn`, or `error`. `error` is `PORT-SCAN` and `HOST-SWEEP`; `warn` is `RARE-DEST`, warning-severity anomalies, and retransmissions; `info` is info-severity anomalies; `debug` is everything else. Items below the level are hidden from the packet list, the alerts table, and the `w` log export; pcap `-w` output, `--json`, the daemon, and the Flows and Stats tabs are not filtered. Warn rows use a muted foreground and error rows a red foreground with no background fill.
     - JSON-lines output (`--json`) with optional packet count (`-c`) and duration (`-G`) limits.
 2. **Egress monitor**
     - A background daemon captures continuously, maps each flow's 5-tuple to a process through the OS socket table, and resolves destination names passively from DNS answers and TLS SNI (no decryption).
@@ -303,6 +306,7 @@ google
     - File: `~/.config/network-monitor/config.toml`; a commented copy of every key is [docs/config.example.toml](docs/config.example.toml).
     - `[capture] default_interface`: interface used when `-i` is omitted.
     - `[display] color_scheme`: read and defaults to `"dark"`, but not applied yet.
+    - `[display] output_level`: minimum output level of the capture TUI, `"debug"` (default), `"info"`, `"warn"`, or `"error"`; an unknown value prints one warning on stderr and falls back to `debug`. The `v` key and the Settings tab override it, and the choice is saved in `tui.toml`.
     - `[filters]`: table of `name = "filter"`; recall one in the filter bar as `:name`.
     - A file that fails to parse is ignored with a message on stderr (`network-monitor: ignoring invalid <path>: ...`) and defaults are used.
 3. **One folder for every per-user file**
@@ -326,7 +330,6 @@ google
     - `j` / `Down`, `k` / `Up`: move the selected row of the focused card; the detail and hex cards scroll instead.
     - `g` / `Home`: first row; `G` / `End`: last row and back to `LIVE`.
     - `PageUp` / `PageDown`: one screen of rows.
-    - `Tab` / `Shift-Tab`: focus the next or previous card (list, detail, hex).
     - Moving up or jumping to the top leaves `LIVE` for `BROWSE`; `G` or landing on the last row returns to `LIVE`.
 2. **Capture TUI: sort**
     - `s`: sort by the next column of the focused table; the cycle ends in capture order.
@@ -337,16 +340,19 @@ google
     - `Ctrl-F`: regex search over info, source, and destination (`Enter` runs it, `Esc` clears it); `n` jumps to the next match.
     - `i` / `o`: show inbound-only / outbound-only packets; press again to clear.
 4. **Capture TUI: views**
-    - `t` top talkers, `P` protocol distribution, `F` flows, `T` timeline, `f` follow the selected TCP stream, `'` bookmarks; press the key again or `Esc` to close.
+    - `1` to `6` open the tabs; `Tab` / `Right` next tab, `Shift-Tab` / `Left` previous tab; `Enter` focuses the next card (on Settings it changes the selected setting).
+    - `t` / `P` Stats, `F` / `T` Flows, `'` Alerts, `f` opens the stream of the selected TCP packet in the Stream tab; `Esc` goes back to Packets.
+    - `<` / `>` move the active tab left or right; dragging a tab on the tab bar reorders it (`Esc` cancels).
     - `d` toggles the detail card, `x` the hex card, `z` both.
     - `c` opens the column editor: `1` to `8` toggle Time, Dir, Process, Host, IP, Proto, Len, Info; `Esc`, `Enter`, or `c` closes it.
 5. **Capture TUI: actions**
     - `Space`: pause or resume.
     - `m`: bookmark the selected packet.
     - `w`: save the visible packets to a log file.
+    - `v`: cycle the output level (`debug`, `info`, `warn`, `error`).
     - `Shift` with an arrow key: move the focused card (see Terminal UI).
     - `l`: reset card order, sizes, and column widths; `L`: switch the display language.
-    - `?`: help; `q`, `Esc`, or `Ctrl-C`: quit (`Esc` first closes a statistics view).
+    - `?`: help; `q` or `Ctrl-C`: quit; `Esc`: back to Packets, and quit on Packets.
 6. **Inspector**
     - `Tab` / `Right` next view, `Shift-Tab` / `Left` previous view, `1` to `5` jump to Connections, Processes, Domains, Alerts, History.
     - `j` / `Down`, `k` / `Up`, `PageUp` / `PageDown`, `Home` / `End`: move the selected row.
@@ -365,6 +371,7 @@ google
 
 1. **Look**
     - One style for both TUIs: an app bar (product badge, interface or file, capture state, freshness dot), cards, clickable footer chips with help and quit pinned right, and a hint row.
+    - The capture screen stacks the app bar, the tab bar, the body of the active tab, the throughput strip (Packets tab only, when the screen is at least 24 rows tall), and two footer rows (chips and hints); a `[v] <level>` chip sits before the language chip.
     - A card has a rounded border; the card under the pointer gets a brighter border, and the focused card gets a thick border with an inverted title.
     - Tables show a scrollbar in its own gray gutter column (`░` track, `█` thumb) and ` a-b / total ` on the bottom border; the selected row is a colored band.
     - The hint row shows the keys that apply to what is under the pointer, then to the focused card; a toast stays 4 seconds and only an error toast is a red fill.
@@ -389,7 +396,7 @@ google
     - Packet data, addresses, protocol names, process names, and filter text are never translated; the detail card keeps protocol field labels as written in the protocol.
 5. **State file**
     - Path: `~/.config/network-monitor/tui.toml`, next to `config.toml`; both TUIs read and write it.
-    - Content: `version`, `language`, card orders, split ratios, and column widths; only values that differ from the default are written, and it is saved only when a change is committed (a drop, a drag release, a reset, a language switch).
+    - Content: `version`, `language`, `output_level`, `capture_tab_order`, card orders, split ratios, and column widths; only values that differ from the default are written (`output_level` only after a choice), and it is saved only when a change is committed (a drop, a drag release, a reset, a language switch, an output level change, a tab move).
     - Saves run on a background writer thread: a burst of changes is coalesced to the newest state, a failed save shows an error toast, and on exit the program waits at most 5 seconds for the writer and prints one stderr warning if the last save failed or is still running.
     - The file is replaced through a temporary file in the same folder, so an interrupted save leaves the old file; a symbolic link (a chain of up to 16 links) is kept and its final target is updated, and as root a link owned by another user is refused.
     - Temporary files an interrupted save left behind are removed at start only when they are at least 60 seconds old, so a save of another running instance is not disturbed.

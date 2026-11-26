@@ -19,6 +19,10 @@
 [display]
 # Accepted but not applied yet: the TUI always uses its dark palette.
 color_scheme = "dark"
+# Minimum output level: debug (the default), info, warn, or error.
+# Items below the level are hidden from the packet list, the alerts table,
+# and the `w` log export. The `v` key and the Settings tab override it per user.
+output_level = "debug"
 
 # Saved display filters, one `name = "filter"` entry per line (default: none).
 # Recall one in the TUI filter bar (press /) as :name, for example :https.

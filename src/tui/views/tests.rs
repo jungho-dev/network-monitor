@@ -7,14 +7,17 @@ use crate::tui::cards::{CardId, UiAction};
 use crate::tui::i18n::Lang;
 use crate::tui::interaction::{Toast, ToastLevel};
 use crate::tui::layout::IDENTITY_ORDER;
+use crate::tui::level::OutputLevel;
 use crate::tui::sort::{SortChange, SortState};
-use crate::tui::state::{Command, OverlayKind};
+use crate::tui::state::{CaptureTab, Command};
 use crate::tui::test_support::{
-    capture_app, draw, dump, glyph_budget_violations, key, populate, tcp_packet,
+    capture_app, draw, dump, glyph_budget_violations, key, populate, shift_key, tcp_packet,
+    threat_packet,
 };
 use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use network_monitor_core::analysis::ThreatKind;
 use ratatui::buffer::Buffer;
-use ratatui::style::Modifier;
+use ratatui::style::{Color, Modifier};
 use std::time::{Duration, Instant};
 
 const SIZES: [(u16, u16); 3] = [(60, 16), (100, 30), (130, 40)];
@@ -92,22 +95,13 @@ fn every_view_renders_in_both_languages_at_the_size_matrix_and_below_minimum() {
             let mut app = sample_app(60);
             app.ui.lang = lang;
             render(&mut app, width, height);
-            // The overlays, the pane toggles, and the input modes must not panic either.
-            for kind in [
-                OverlayKind::TopTalkers,
-                OverlayKind::ProtocolDist,
-                OverlayKind::Flows,
-                OverlayKind::Timeline,
-                OverlayKind::Bookmarks,
-            ] {
-                app.overlay = Some(kind);
-                app.sync_default_focus();
-                app.stats_dirty = true;
+            // Every tab, the pane toggles, and the input modes must not panic either.
+            for tab in CaptureTab::ALL {
+                app.switch_tab(tab);
                 app.refresh_stats(Instant::now());
                 render(&mut app, width, height);
             }
-            app.overlay = None;
-            app.sync_default_focus();
+            app.switch_tab(CaptureTab::Packets);
             for (detail, hex) in [(true, false), (false, true), (false, false), (true, true)] {
                 app.show_detail = detail;
                 app.show_hex = hex;
@@ -229,17 +223,22 @@ fn wide_footer_registers_every_chip_as_a_clickable_area() {
         UiAction::OpenColumns,
         UiAction::SaveLog,
         UiAction::ResetLayout,
+        UiAction::CycleLevel,
         UiAction::ToggleLanguage,
         UiAction::ShowHelp,
         UiAction::Quit,
     ] {
         assert!(actions.contains(&action), "{action:?}");
     }
-    assert_eq!(actions.len(), 8);
+    assert_eq!(actions.len(), 9);
+    assert_eq!(app.ui.hits.tab_rects.len(), 6, "one hit area per tab");
+    let level = button_rect(&app, UiAction::CycleLevel).unwrap();
+    let language = button_rect(&app, UiAction::ToggleLanguage).unwrap();
     assert!(
-        app.ui.hits.tab_rects.is_empty(),
-        "the capture screen has no tabs"
+        level.right() < language.x,
+        "the level chip sits before the language chip"
     );
+    assert!(dump(&render(&mut app, 130, 40))[38].contains("[v] debug"));
 }
 
 #[test]
@@ -423,7 +422,7 @@ fn position_label_sits_on_the_bottom_border_when_the_list_overflows() {
     let rows = dump(&render(&mut app, 100, 30));
     let list = card_rect(&app, CardId::PacketList);
     let bottom = &rows[usize::from(list.bottom() - 1)];
-    assert!(bottom.contains("1-16 / 100"), "{bottom}");
+    assert!(bottom.contains("1-15 / 100"), "{bottom}");
 }
 
 // 5. selection band -----------------------------------------------------------
@@ -496,7 +495,7 @@ fn only_an_error_toast_is_a_red_fill_and_it_clears_after_four_seconds() {
     assert_eq!((cell.bg, cell.fg), (theme::COLOR_CRIT_BG, theme::FG_STRONG));
     assert!(dump(&buffer)[39].contains("failed"));
     // The hint row lists keys after the toast.
-    assert!(dump(&buffer)[39].contains("Tab Next card"));
+    assert!(dump(&buffer)[39].contains("Tab Next tab"));
     assert!(!app.ui.expire_toast(now + Duration::from_millis(3999)));
     assert!(app.ui.expire_toast(now + Duration::from_secs(4)));
 }
@@ -548,31 +547,23 @@ fn double_lines_appear_only_in_overlays_never_on_cards_in_any_state() {
 
 #[test]
 fn every_rendered_cell_stays_inside_the_glyph_budget_in_both_languages() {
-    let overlays = [
-        None,
-        Some(OverlayKind::TopTalkers),
-        Some(OverlayKind::ProtocolDist),
-        Some(OverlayKind::Flows),
-        Some(OverlayKind::Timeline),
-        Some(OverlayKind::Stream),
-        Some(OverlayKind::Bookmarks),
-    ];
     for lang in LANGS {
         for (width, height) in SIZES {
             let mut app = sample_app(40);
             app.ui.lang = lang;
             app.bookmarks.insert(1);
-            for overlay in overlays {
-                app.overlay = overlay;
-                app.sync_default_focus();
+            app.packets
+                .push(threat_packet(40, ThreatKind::RareExternal));
+            for tab in CaptureTab::ALL {
+                app.switch_tab(tab);
+                app.refresh_stats(Instant::now());
                 let found = glyph_budget_violations(&render(&mut app, width, height));
                 assert!(
                     found.is_empty(),
-                    "{lang:?} {width}x{height} {overlay:?}: {found:?}"
+                    "{lang:?} {width}x{height} {tab:?}: {found:?}"
                 );
             }
-            app.overlay = None;
-            app.sync_default_focus();
+            app.switch_tab(CaptureTab::Packets);
             app.ui.show_help = true;
             let found = glyph_budget_violations(&render(&mut app, width, height));
             assert!(
@@ -999,13 +990,13 @@ fn column_editor_row_names_columns_in_the_active_language() {
     let mut app = sample_app(5);
     app.handle_key(key(KeyCode::Char('c')));
     app.handle_key(key(KeyCode::Char('2')));
-    let english = dump(&render(&mut app, 130, 40))[1].clone();
+    let english = dump(&render(&mut app, 130, 40))[2].clone();
     assert!(
         english.contains("Columns:") && english.contains("[2]Dir (off)"),
         "{english}"
     );
     app.ui.lang = Lang::Ko;
-    let korean = dump(&render(&mut app, 130, 40))[1].clone();
+    let korean = dump(&render(&mut app, 130, 40))[2].clone();
     assert!(
         korean.contains("열:") && korean.contains("[2]방향 (끔)"),
         "{korean}"
@@ -1218,38 +1209,42 @@ fn app_with_traffic() -> App {
 }
 
 #[test]
-fn statistics_views_render_tables_with_both_languages_and_sortable_headers() {
+fn statistics_tabs_render_both_cards_in_both_languages_with_the_main_card_focused() {
     for lang in LANGS {
-        for (kind, english, korean) in [
-            (OverlayKind::TopTalkers, "Top talkers", "상위 통신"),
+        for (tab, english, korean) in [
             (
-                OverlayKind::ProtocolDist,
-                "Protocol distribution",
-                "프로토콜 분포",
+                CaptureTab::Stats,
+                ["Top talkers", "Protocol distribution"],
+                ["상위 통신", "프로토콜 분포"],
             ),
-            (OverlayKind::Flows, "Flows", "플로우"),
-            (OverlayKind::Bookmarks, "Bookmarks (2)", "북마크 (2)"),
             (
-                OverlayKind::Timeline,
-                "Connection timeline",
-                "연결 타임라인",
+                CaptureTab::Flows,
+                ["Flows (", "Connection timeline"],
+                ["플로우 (", "연결 타임라인"],
+            ),
+            (
+                CaptureTab::Alerts,
+                ["Threat alerts (0)", "Bookmarks (2)"],
+                ["위협 경고 (0)", "북마크 (2)"],
             ),
         ] {
             let mut app = app_with_traffic();
             app.ui.lang = lang;
-            app.overlay = Some(kind);
-            app.sync_default_focus();
+            app.switch_tab(tab);
             app.refresh_stats(Instant::now());
-            for (width, height) in SIZES {
+            render(&mut app, 60, 16);
+            for (width, height) in [(100, 30), (130, 40)] {
                 let text = text_of(&mut app, width, height);
-                let title = if lang == Lang::En { english } else { korean };
-                assert!(
-                    text.contains(title),
-                    "{lang:?} {kind:?} {width}x{height}: {title}"
-                );
+                let titles = if lang == Lang::En { english } else { korean };
+                for title in titles {
+                    assert!(
+                        text.contains(title),
+                        "{lang:?} {tab:?} {width}x{height}: {title}"
+                    );
+                }
             }
-            assert_eq!(app.ui.hits.card_rects.len(), 1, "an overlay is one card");
-            assert_eq!(app.ui.focused_card(), kind.card());
+            assert_eq!(app.ui.hits.card_rects.len(), 2, "{tab:?} has two cards");
+            assert_eq!(app.ui.focused_card(), tab.main_card());
         }
     }
 }
@@ -1257,8 +1252,7 @@ fn statistics_views_render_tables_with_both_languages_and_sortable_headers() {
 #[test]
 fn a_statistics_table_sorts_by_header_click_and_its_selection_follows_the_row() {
     let mut app = app_with_traffic();
-    app.overlay = Some(OverlayKind::Flows);
-    app.sync_default_focus();
+    app.switch_tab(CaptureTab::Flows);
     app.refresh_stats(Instant::now());
     render(&mut app, 130, 40);
     app.handle_key(key(KeyCode::Down));
@@ -1302,7 +1296,7 @@ fn the_stream_view_shows_both_directions_and_an_empty_stream_says_so() {
     app.selected = 0;
     app.follow = false;
     app.handle_key(key(KeyCode::Char('f')));
-    assert_eq!(app.overlay, Some(OverlayKind::Stream));
+    assert_eq!(app.tab, CaptureTab::Stream);
     let text = text_of(&mut app, 100, 30);
     assert!(
         text.contains(">> GET /") && text.contains("<< 200 OK"),
@@ -1310,10 +1304,185 @@ fn the_stream_view_shows_both_directions_and_an_empty_stream_says_so() {
     );
     assert!(text.contains("Follow TCP"));
 
-    let mut none = capture_app();
-    none.overlay = Some(OverlayKind::Stream);
-    none.sync_default_focus();
-    assert!(text_of(&mut none, 100, 30).contains("No stream"));
+    for (lang, headline, hint) in [
+        (
+            Lang::En,
+            "No stream open",
+            "Select a TCP packet and press f",
+        ),
+        (Lang::Ko, "열린 스트림 없음", "TCP 패킷 선택 후 f"),
+    ] {
+        let mut none = capture_app();
+        none.ui.lang = lang;
+        none.handle_key(key(KeyCode::Char('5')));
+        let text = text_of(&mut none, 100, 30);
+        assert!(text.contains(headline) && text.contains(hint), "{lang:?}");
+    }
+}
+
+// 15. tabs, output level, alerts, settings ------------------------------------
+const TAB_LABELS_EN: [&str; 6] = ["Packets", "Flows", "Stats", "Alerts", "Stream", "Settings"];
+const TAB_LABELS_KO: [&str; 6] = ["패킷", "흐름", "통계", "경고", "스트림", "설정"];
+
+#[test]
+fn every_tab_shows_all_tab_labels_and_the_pinned_chips_at_the_size_matrix() {
+    for (lang, labels, chips) in [
+        (Lang::En, TAB_LABELS_EN, ["[L] EN", "[?] Help", "[q] Quit"]),
+        (
+            Lang::Ko,
+            TAB_LABELS_KO,
+            ["[L] KO", "[?] 도움말", "[q] 종료"],
+        ),
+    ] {
+        for tab in CaptureTab::ALL {
+            let mut app = app_with_traffic();
+            app.ui.lang = lang;
+            app.switch_tab(tab);
+            app.refresh_stats(Instant::now());
+            for (width, height) in SIZES {
+                let rows = dump(&render(&mut app, width, height));
+                for label in labels {
+                    assert!(
+                        rows[1].contains(label),
+                        "{lang:?} {tab:?} {width}x{height}: {label} in {}",
+                        rows[1]
+                    );
+                }
+                assert_eq!(app.ui.hits.tab_rects.len(), 6);
+                if (width, height) == (60, 16) {
+                    for chip in chips {
+                        assert!(rows[14].contains(chip), "{lang:?} {tab:?}: {chip}");
+                    }
+                }
+            }
+            let rows = dump(&render(&mut app, 59, 15));
+            for (index, row) in rows.iter().enumerate() {
+                assert_eq!(
+                    !row.trim().is_empty(),
+                    index == 15 / 2,
+                    "{lang:?} {tab:?} row {index}: {row}"
+                );
+            }
+            assert!(app.ui.hits.tab_rects.is_empty() && app.ui.hits.card_rects.is_empty());
+        }
+    }
+}
+
+#[test]
+fn number_keys_tab_keys_arrows_and_a_tab_bar_click_switch_tabs_and_esc_goes_back() {
+    let mut app = sample_app(10);
+    for (digit, tab) in ('1'..='6').zip(CaptureTab::ALL) {
+        app.handle_key(key(KeyCode::Char(digit)));
+        assert_eq!(app.tab, tab, "{digit}");
+    }
+    app.handle_key(key(KeyCode::Tab));
+    assert_eq!(app.tab, CaptureTab::Packets, "Tab wraps to the first tab");
+    app.handle_key(key(KeyCode::BackTab));
+    assert_eq!(app.tab, CaptureTab::Settings);
+    app.handle_key(shift_key(KeyCode::Tab));
+    assert_eq!(app.tab, CaptureTab::Stream);
+    app.handle_key(key(KeyCode::Right));
+    assert_eq!(app.tab, CaptureTab::Settings);
+    app.handle_key(key(KeyCode::Left));
+    assert_eq!(app.tab, CaptureTab::Stream);
+
+    render(&mut app, 130, 40);
+    let (_, alerts) = app.ui.hits.tab_rects[CaptureTab::Alerts.index()];
+    let now = Instant::now();
+    click(&mut app, alerts.x + 1, alerts.y, now);
+    release(&mut app, alerts.x + 1, alerts.y, now);
+    assert_eq!(app.tab, CaptureTab::Alerts);
+    assert_eq!(app.ui.focused_card(), CardId::ThreatTable);
+    let text = text_of(&mut app, 130, 40);
+    assert!(text.contains("Threat alerts"), "{text}");
+
+    app.handle_key(key(KeyCode::Esc));
+    assert!(app.tab == CaptureTab::Packets && !app.should_quit);
+    app.handle_key(key(KeyCode::Esc));
+    assert!(app.should_quit, "Esc on Packets quits");
+}
+
+#[test]
+fn the_threat_table_lists_only_threats_at_the_level_toned_on_zebra_without_fill() {
+    let mut app = capture_app();
+    let mut retransmitted = tcp_packet(0, [10, 0, 0, 1], 40000, [93, 184, 216, 2], 443, 60, b"");
+    retransmitted.retransmission = true;
+    app.packets.push(retransmitted);
+    app.packets.push(threat_packet(1, ThreatKind::RareExternal));
+    app.packets.push(threat_packet(2, ThreatKind::PortScan));
+    app.packets.push(threat_packet(3, ThreatKind::HostSweep));
+    app.ui.level_choice = Some(OutputLevel::Warn);
+    app.switch_tab(CaptureTab::Alerts);
+    app.refresh_stats(Instant::now());
+    let buffer = render(&mut app, 130, 40);
+    assert_eq!(app.ui.views[CardId::ThreatTable as usize].total, 3);
+    let rows = dump(&buffer);
+    for tag in ["RARE-DEST", "PORT-SCAN", "HOST-SWEEP"] {
+        assert!(rows.iter().any(|row| row.contains(tag)), "{tag}");
+    }
+
+    // Below the title border, every cell is panel or zebra outside the
+    // selected band, and no row is filled.
+    let card = card_rect(&app, CardId::ThreatTable);
+    let band_y = card.y + 2;
+    for y in card.y + 1..card.bottom() {
+        for x in card.x..card.right() {
+            let bg = buffer.cell((x, y)).unwrap().bg;
+            for filled in [208u8, 203, 160] {
+                assert_ne!(bg, Color::Indexed(filled), "({x},{y})");
+            }
+            if y != band_y {
+                assert!(
+                    bg == theme::BG_PANEL || bg == theme::BG_ZEBRA,
+                    "({x},{y}) {bg:?}"
+                );
+            }
+        }
+    }
+    for (tag, tone) in [
+        ("PORT-SCAN", theme::COLOR_CRIT),
+        ("HOST-SWEEP", theme::COLOR_CRIT),
+    ] {
+        let y = rows.iter().position(|row| row.contains(tag)).unwrap();
+        let x = rows[y][..rows[y].find(tag).unwrap()].chars().count() as u16;
+        let cell = buffer.cell((x, y as u16)).unwrap();
+        assert_eq!(cell.fg, tone, "{tag}");
+        assert!(!cell.modifier.contains(Modifier::BOLD), "{tag}");
+    }
+
+    app.handle_key(key(KeyCode::Char('v')));
+    assert_eq!(app.ui.min_level(), OutputLevel::Error);
+    app.refresh_stats(Instant::now());
+    let text = text_of(&mut app, 130, 40);
+    assert_eq!(app.ui.views[CardId::ThreatTable as usize].total, 2);
+    assert!(!text.contains("RARE-DEST"), "{text}");
+}
+
+#[test]
+fn settings_enter_cycles_the_level_on_row_zero_and_toggles_the_language_on_row_one() {
+    let mut app = sample_app(5);
+    app.handle_key(key(KeyCode::Char('6')));
+    assert_eq!(app.tab, CaptureTab::Settings);
+    let text = text_of(&mut app, 100, 30);
+    for needle in [
+        "Output level",
+        "debug info warn error",
+        "config default",
+        "Language",
+        "EN",
+    ] {
+        assert!(text.contains(needle), "{needle}\n{text}");
+    }
+    assert_eq!(app.handle_key(key(KeyCode::Enter)), Command::SaveState);
+    assert_eq!(app.ui.level_choice, Some(OutputLevel::Info));
+    assert!(!text_of(&mut app, 100, 30).contains("config default"));
+    app.handle_key(key(KeyCode::Down));
+    assert_eq!(app.ui.views[CardId::SettingsList as usize].selected, 1);
+    assert_eq!(app.handle_key(key(KeyCode::Enter)), Command::SaveState);
+    assert_eq!(app.ui.lang, Lang::Ko);
+    assert_eq!(app.ui.level_choice, Some(OutputLevel::Info));
+    let korean = text_of(&mut app, 100, 30);
+    assert!(korean.contains("언어") && korean.contains("KO"), "{korean}");
 }
 
 // 14. empty and idle states ---------------------------------------------------
@@ -1351,30 +1520,30 @@ fn empty_list_states_name_the_cause_and_the_next_step_in_both_languages() {
 #[test]
 fn filter_row_shows_idle_editing_applied_and_direction_states() {
     let mut app = sample_app(5);
-    assert!(dump(&render(&mut app, 130, 40))[1].contains("press / to filter"));
+    assert!(dump(&render(&mut app, 130, 40))[2].contains("press / to filter"));
     app.handle_key(key(KeyCode::Char('/')));
     app.handle_key(key(KeyCode::Char('t')));
     app.handle_key(key(KeyCode::Char('c')));
     app.handle_key(key(KeyCode::Char('p')));
-    let editing = dump(&render(&mut app, 130, 40))[1].clone();
+    let editing = dump(&render(&mut app, 130, 40))[2].clone();
     assert!(editing.contains("Filter: tcp│"), "{editing}");
     app.handle_key(key(KeyCode::Enter));
-    let applied = dump(&render(&mut app, 130, 40))[1].clone();
+    let applied = dump(&render(&mut app, 130, 40))[2].clone();
     assert!(
         applied.contains("tcp") && applied.contains("[Applied]"),
         "{applied}"
     );
     app.handle_key(key(KeyCode::Char('i')));
-    assert!(dump(&render(&mut app, 130, 40))[1].contains("[IN only]"));
+    assert!(dump(&render(&mut app, 130, 40))[2].contains("[IN only]"));
     app.handle_key(key(KeyCode::Char('/')));
     app.handle_key(key(KeyCode::Esc));
     app.handle_key(key(KeyCode::Char('l')));
     app.handle_key(key(KeyCode::Char('/')));
     app.mode = InputMode::Search;
-    let search = dump(&render(&mut app, 130, 40))[1].clone();
+    let search = dump(&render(&mut app, 130, 40))[2].clone();
     assert!(search.contains("Regex search:"), "{search}");
     app.ui.lang = Lang::Ko;
-    assert!(dump(&render(&mut app, 130, 40))[1].contains("정규식 검색:"));
+    assert!(dump(&render(&mut app, 130, 40))[2].contains("정규식 검색:"));
 }
 
 #[test]
@@ -1391,4 +1560,201 @@ fn throughput_strip_names_the_rate_in_the_active_language() {
     app.ui.lang = Lang::Ko;
     let korean = dump(&render(&mut app, 100, 30));
     assert!(korean[27].contains("처리량 12 패킷/초"), "{}", korean[27]);
+}
+
+// 16. tab reordering ----------------------------------------------------------
+fn tab_rect(app: &App, tab: CaptureTab) -> Rect {
+    app.ui
+        .hits
+        .capture_tabs
+        .iter()
+        .find(|(drawn, _)| *drawn == tab)
+        .map(|(_, rect)| *rect)
+        .unwrap_or_else(|| panic!("tab {tab:?} was not drawn"))
+}
+
+fn drawn_tabs(app: &App) -> Vec<CaptureTab> {
+    app.ui
+        .hits
+        .capture_tabs
+        .iter()
+        .map(|(tab, _)| *tab)
+        .collect()
+}
+
+#[test]
+fn greater_than_on_packets_draws_the_next_tab_first_and_digit_one_selects_it() {
+    let mut app = sample_app(10);
+    assert_eq!(app.handle_key(key(KeyCode::Char('>'))), Command::SaveState);
+    let rows = dump(&render(&mut app, 100, 30));
+    assert_eq!(
+        drawn_tabs(&app)[..2],
+        [CaptureTab::Flows, CaptureTab::Packets]
+    );
+    assert!(
+        rows[1].contains("1 Flows") && rows[1].contains("2 Packets"),
+        "{}",
+        rows[1]
+    );
+    app.handle_key(key(KeyCode::Char('1')));
+    assert_eq!(app.tab, CaptureTab::Flows);
+}
+
+#[test]
+fn dragging_the_first_tab_onto_the_third_previews_the_order_and_release_commits_it() {
+    for lang in LANGS {
+        for (width, height) in SIZES {
+            let case = format!("{lang:?} {width}x{height}");
+            let mut app = sample_app(10);
+            app.ui.lang = lang;
+            render(&mut app, width, height);
+            let packets = tab_rect(&app, CaptureTab::Packets);
+            let stats = tab_rect(&app, CaptureTab::Stats);
+            let now = Instant::now();
+
+            // 1. press opens the drag, dragging over Stats previews
+            assert_eq!(
+                click(&mut app, packets.x + 1, packets.y, now),
+                Command::None
+            );
+            assert!(app.tab_drag.is_some(), "{case}");
+            let pointer = stats.x + stats.width / 2;
+            assert_eq!(drag_to(&mut app, pointer, stats.y, now), Command::None);
+            let preview = [CaptureTab::Flows, CaptureTab::Stats, CaptureTab::Packets];
+            assert_eq!(app.ui.tab_order[..3], preview, "{case}");
+
+            // 2. redraw: new order, slot numbers, active dragged tab, drag hints
+            let buffer = render(&mut app, width, height);
+            assert_eq!(drawn_tabs(&app)[..3], preview, "{case}");
+            let rows = dump(&buffer);
+            assert!(rows[1].trim_start().starts_with('1'), "{case} {}", rows[1]);
+            let moved = tab_rect(&app, CaptureTab::Packets);
+            let cell = buffer.cell((moved.x, moved.y)).unwrap();
+            assert_eq!(cell.bg, theme::BG_PANEL, "{case}");
+            let hint_row: String = rows[usize::from(height) - 1].split_whitespace().collect();
+            let cancel: String = i18n::text(lang, Msg::HintCancel)
+                .split_whitespace()
+                .collect();
+            if width >= 100 {
+                assert!(hint_row.contains(&cancel), "{case} {hint_row}");
+            }
+
+            // 3. release commits, saves, and shows the toast
+            assert_eq!(
+                release(&mut app, pointer, stats.y, now),
+                Command::SaveState,
+                "{case}"
+            );
+            assert!(app.tab_drag.is_none(), "{case}");
+            assert_eq!(
+                app.ui.toast.as_ref().map(|toast| toast.text.as_str()),
+                Some(i18n::text(lang, Msg::ToastTabMoved)),
+                "{case}"
+            );
+
+            // 4. digits follow the drawn order
+            app.handle_key(key(KeyCode::Char('1')));
+            assert_eq!(app.tab, CaptureTab::Flows, "{case}");
+        }
+    }
+}
+
+#[test]
+fn esc_during_a_tab_drag_restores_the_order_and_a_lost_release_commits_it() {
+    // 1. Esc: baseline order, no quit
+    let mut app = sample_app(10);
+    render(&mut app, 100, 30);
+    let packets = tab_rect(&app, CaptureTab::Packets);
+    let stats = tab_rect(&app, CaptureTab::Stats);
+    let now = Instant::now();
+    click(&mut app, packets.x + 1, packets.y, now);
+    drag_to(&mut app, stats.x + 1, stats.y, now);
+    assert_ne!(app.ui.tab_order, CaptureTab::ALL);
+    assert_eq!(app.handle_key(key(KeyCode::Char('2'))), Command::None);
+    assert_eq!(app.tab, CaptureTab::Packets);
+    assert_eq!(app.handle_key(key(KeyCode::Esc)), Command::None);
+    assert!(!app.should_quit && app.tab_drag.is_none());
+    assert_eq!(app.ui.tab_order, CaptureTab::ALL);
+
+    // 2. buttonless move after a lost release keeps the shown order
+    render(&mut app, 100, 30);
+    click(&mut app, packets.x + 1, packets.y, now);
+    drag_to(&mut app, stats.x + 1, stats.y, now);
+    let moved = app.ui.tab_order;
+    assert_eq!(
+        app.handle_mouse(mouse(MouseEventKind::Moved, 0, 10), now),
+        Command::SaveState
+    );
+    assert!(app.tab_drag.is_none());
+    assert_eq!(app.ui.tab_order, moved);
+    assert_eq!(moved[2], CaptureTab::Packets);
+}
+
+#[test]
+fn a_plain_tab_click_switches_tabs_and_saves_nothing() {
+    let mut app = sample_app(10);
+    render(&mut app, 100, 30);
+    let stats = tab_rect(&app, CaptureTab::Stats);
+    let now = Instant::now();
+    assert_eq!(click(&mut app, stats.x + 1, stats.y, now), Command::None);
+    assert_eq!(release(&mut app, stats.x + 1, stats.y, now), Command::None);
+    assert_eq!(app.tab, CaptureTab::Stats);
+    assert_eq!(app.ui.tab_order, CaptureTab::ALL);
+    assert!(app.tab_drag.is_none() && app.ui.toast.is_none());
+}
+
+#[test]
+fn a_resize_during_a_moved_tab_drag_commits_and_saves() {
+    let mut app = sample_app(10);
+    render(&mut app, 100, 30);
+    let packets = tab_rect(&app, CaptureTab::Packets);
+    let stats = tab_rect(&app, CaptureTab::Stats);
+    let now = Instant::now();
+    click(&mut app, packets.x + 1, packets.y, now);
+    drag_to(&mut app, stats.x + 1, stats.y, now);
+    let moved = app.ui.tab_order;
+    assert_ne!(moved, CaptureTab::ALL);
+    assert_eq!(app.handle_resize(), Command::SaveState);
+    assert!(app.tab_drag.is_none());
+    assert_eq!(app.ui.tab_order, moved);
+}
+
+#[test]
+fn a_reordered_tab_bar_draws_the_labels_in_the_new_order_in_both_languages() {
+    let order = [
+        CaptureTab::Settings,
+        CaptureTab::Stream,
+        CaptureTab::Alerts,
+        CaptureTab::Stats,
+        CaptureTab::Flows,
+        CaptureTab::Packets,
+    ];
+    for (lang, labels) in [(Lang::En, TAB_LABELS_EN), (Lang::Ko, TAB_LABELS_KO)] {
+        for (width, height) in [(60, 16), (130, 40)] {
+            let case = format!("{lang:?} {width}x{height}");
+            let mut app = sample_app(10);
+            app.ui.lang = lang;
+            app.ui.tab_order = order;
+            let buffer = render(&mut app, width, height);
+            let rows = dump(&buffer);
+            let positions: Vec<usize> = order
+                .iter()
+                .map(|tab| {
+                    rows[1]
+                        .find(labels[tab.index()])
+                        .unwrap_or_else(|| panic!("{case}: {tab:?} in {}", rows[1]))
+                })
+                .collect();
+            assert!(
+                positions.windows(2).all(|pair| pair[0] < pair[1]),
+                "{case}: {}",
+                rows[1]
+            );
+            assert_eq!(drawn_tabs(&app), order, "{case}");
+            assert!(rows[1].trim_start().starts_with('1'), "{case} {}", rows[1]);
+            let active = tab_rect(&app, CaptureTab::Packets);
+            let cell = buffer.cell((active.x, active.y)).unwrap();
+            assert_eq!(cell.bg, theme::BG_PANEL, "{case}");
+        }
+    }
 }

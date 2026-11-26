@@ -436,12 +436,15 @@ fn main() -> Result<()> {
             } else {
                 tui::run_tui(
                     decoded_rx,
-                    buffer_size,
-                    write.as_deref(),
-                    config.filters.clone(),
-                    pcapng,
-                    local_ips,
-                    tui::state::CaptureSource::Interface(interface.clone()),
+                    tui::CaptureOptions {
+                        buffer_size,
+                        save_path: write,
+                        saved_filters: config.filters.clone(),
+                        pcapng,
+                        local_ips,
+                        source: tui::state::CaptureSource::Interface(interface.clone()),
+                        output_level: config.output_level(),
+                    },
                 )?;
             }
             stop.store(true, Ordering::Relaxed);
@@ -478,12 +481,15 @@ fn main() -> Result<()> {
             } else {
                 tui::run_tui(
                     decoded_rx,
-                    buffer_size,
-                    None,
-                    config.filters.clone(),
-                    false,
-                    Vec::new(),
-                    tui::state::CaptureSource::File(file.display().to_string()),
+                    tui::CaptureOptions {
+                        buffer_size,
+                        save_path: None,
+                        saved_filters: config.filters.clone(),
+                        pcapng: false,
+                        local_ips: Vec::new(),
+                        source: tui::state::CaptureSource::File(file.display().to_string()),
+                        output_level: config.output_level(),
+                    },
                 )?;
             }
             stop.store(true, Ordering::Relaxed);

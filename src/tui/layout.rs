@@ -19,6 +19,9 @@ pub enum SplitGroup {
     // Main area over the hex pane; each slot holds a bundle, so no reordering.
     CaptureRows,
     CaptureCols,
+    CaptureFlows,
+    CaptureStats,
+    CaptureAlerts,
     InspectConn,
     InspectProc,
     InspectDomain,
@@ -30,6 +33,9 @@ impl SplitGroup {
     pub const ALL: [Self; GROUP_COUNT] = [
         Self::CaptureRows,
         Self::CaptureCols,
+        Self::CaptureFlows,
+        Self::CaptureStats,
+        Self::CaptureAlerts,
         Self::InspectConn,
         Self::InspectProc,
         Self::InspectDomain,
@@ -42,6 +48,9 @@ impl SplitGroup {
         match self {
             Self::CaptureRows => "capture_rows",
             Self::CaptureCols => "capture_cols",
+            Self::CaptureFlows => "capture_flows",
+            Self::CaptureStats => "capture_stats",
+            Self::CaptureAlerts => "capture_alerts",
             Self::InspectConn => "inspect_conn",
             Self::InspectProc => "inspect_proc",
             Self::InspectDomain => "inspect_domain",
@@ -56,7 +65,7 @@ impl SplitGroup {
 
     pub fn axis(self) -> SplitAxis {
         match self {
-            Self::CaptureCols => SplitAxis::Columns,
+            Self::CaptureCols | Self::CaptureStats => SplitAxis::Columns,
             _ => SplitAxis::Rows,
         }
     }

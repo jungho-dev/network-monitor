@@ -41,7 +41,8 @@ pub const COLOR_WARN: Color = Color::Indexed(220);
 pub const COLOR_CRIT: Color = Color::Indexed(203);
 // Error toast fill only (with white text).
 pub const COLOR_CRIT_BG: Color = Color::Indexed(160);
-pub const COLOR_ANOMALY: Color = Color::Indexed(208);
+// Muted foreground for warn-level packet rows (no fill, no bold).
+pub const TONE_WARN: Color = Color::Indexed(180);
 
 // 4. packet accents -----------------------------------------------------------
 pub const DIR_IN: Color = Color::Indexed(78);
@@ -126,6 +127,7 @@ mod tests {
             ACCENT_DNS_ARP,
             ACCENT_ICMP,
             ACCENT_TLS,
+            TONE_WARN,
         ] {
             assert_ne!(color, BORDER_FOCUS);
         }

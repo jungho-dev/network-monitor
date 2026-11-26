@@ -56,7 +56,7 @@ network-monitor/
 │  ├─ main.rs
 │  ├─ core/ (cli.rs, config.rs, permissions.rs)
 │  ├─ inspect/ (mod.rs, state.rs, views.rs, glue.rs, tests.rs)
-│  └─ tui/ (mod.rs, state.rs, theme.rs, i18n.rs, layout.rs, layout_store.rs, state_writer.rs, link_guard.rs, interaction.rs, format.rs, cards.rs, columns.rs, sort.rs, stats.rs, capture_io.rs, terminal.rs, views/)
+│  └─ tui/ (mod.rs, state.rs, theme.rs, i18n.rs, layout.rs, layout_store.rs, state_writer.rs, link_guard.rs, interaction.rs, format.rs, cards.rs, columns.rs, sort.rs, level.rs, tab_move.rs, stats.rs, capture_io.rs, terminal.rs, views/)
 └─ crates/network-monitor-core/
    ├─ Cargo.toml
    └─ src/
@@ -78,10 +78,13 @@ network-monitor/
 ```markdown
 src/main.rs: command dispatch, decode thread, JSON output loop, daemon and inspector entry points
 src/core/cli.rs: clap definitions for every command and option
-src/core/config.rs: optional config.toml (default interface, color_scheme accepted but unused, saved filters)
+src/core/config.rs: optional config.toml (default interface, color_scheme accepted but unused, output_level, saved filters)
 crates/network-monitor-core/src/app_dir.rs: the single per-user folder ~/.config/network-monitor/ (config, daemon state, saved capture logs)
 src/core/permissions.rs: capture privilege check (Linux: root required; Windows: Npcap and Administrator note)
 src/tui/: the terminal UI kit shared by both TUIs and the capture screen (see Terminal UI)
+src/tui/level.rs: output level (debug, info, warn, error) and the packet-to-level mapping
+src/tui/tab_move.rs: capture tab reordering (tab drag, < and > keys)
+src/tui/views/alerts.rs, src/tui/views/settings.rs: the Alerts and Settings tabs
 src/inspect/: inspector TUI: plain-row state and views on every platform, daemon socket glue on Unix only
 build.rs: Windows resource embedding and, for gnullvm targets, libunwind.dll copy
 assets/icon: the two WebP masters, the generated ICO, the resource script, and the ICO regeneration script
@@ -201,17 +204,20 @@ pcap interface
 ## 7. Terminal UI
 
 1. **Module layout**
-    - `src/tui/` is shared by both screens: `theme.rs` (Indexed-color palette), `i18n.rs` (en/ko catalog), `layout.rs` (split ratios and card order), `layout_store.rs` (state file), `state_writer.rs` (state writer thread), `link_guard.rs` (symbolic-link resolution and the root guard), `interaction.rs` (gestures, injected clock), `format.rs` (width-aware text), `cards.rs` and `columns.rs` (card ids, hit areas, column definitions), `sort.rs` (typed sort keys), and `views/` (`chrome.rs` app bar, tabs, footer, help; `common.rs` cards, tables, scrollbar; the capture views).
+    - `src/tui/` is shared by both screens: `theme.rs` (Indexed-color palette), `i18n.rs` (en/ko catalog), `layout.rs` (split ratios and card order), `layout_store.rs` (state file), `state_writer.rs` (state writer thread), `link_guard.rs` (symbolic-link resolution and the root guard), `interaction.rs` (gestures, injected clock), `format.rs` (width-aware text), `cards.rs` and `columns.rs` (card ids, hit areas, column definitions), `sort.rs` (typed sort keys), `level.rs` (output level and the packet-to-level mapping), `tab_move.rs` (capture tab reordering), and `views/` (`chrome.rs` app bar, tabs, footer, help; `common.rs` cards, tables, scrollbar; the capture views, including `alerts.rs` and `settings.rs`).
     - `state.rs` holds the capture state and returns a `Command` from each key or mouse transition; `mod.rs` dispatches I/O commands to background threads.
     - Views are pure render functions over `&mut App` or `&mut Inspect` that only record hit areas; the hit areas are reset at the start of every frame.
 2. **Terminal lifecycle**
     - `terminal.rs` enters raw mode, the alternate screen, mouse capture, and a hidden cursor together, and restores them from a `Drop` guard and a panic hook that share one idempotent restore.
     - The shared event loop (`TuiHost`) redraws when state changed or after a 1 s idle interval, drains queued input before drawing, ignores key release events, and shortens its wait to the next timer (a toast expiry or the long-press threshold).
 3. **Capture TUI**
-    - Layout: app bar, filter bar, packet list with the detail card beside it, the hex card, a throughput strip (only when the screen is at least 24 rows tall), and the footer.
-    - The list, detail, and hex panes are cards in two groups: `CaptureRows` (main area over hex, resizable) and `CaptureCols` (list and detail, resizable and reorderable).
+    - Layout: app bar, tab bar, the body of the active tab, a throughput strip (Packets tab only, and only when the screen is at least 24 rows tall), and two footer rows (chips and hints).
+    - Tabs: `CaptureTab` has six tabs (Packets, Flows, Stats, Alerts, Stream, Settings) with the keys `1` to `6` in drawn order. `switch_tab` cancels a card move, commits a drag that had moved, gives the keys to the tab's main card, and marks the statistics cache dirty on Flows, Stats, and Alerts.
+    - The tab order is `Ui::tab_order` in the shared `Ui`, so a state save from the inspector keeps it; `tab_move.rs` previews a tab drag, restores the order on `Esc`, and moves the active tab with `<` and `>`.
+    - The Packets body is a filter row over the list and detail cards and the hex card; the list, detail, and hex panes are cards in two groups: `CaptureRows` (main area over hex, resizable) and `CaptureCols` (list and detail, resizable and reorderable). Flows, Stats, Alerts, and Settings each split their own cards.
+    - Output level: `OutputLevel` comes from `[display] output_level` (`Config::output_level`), a saved choice overrides it (`Ui::min_level`), and `v` or the Settings tab cycles it. `level_of` maps a packet's threat, anomaly severity, and retransmission mark to a level, and `passes` hides packets below the level (skipped at `debug`) together with the text and direction filters. Warn rows draw a muted foreground and error rows a red foreground with no fill.
     - The packet list draws only the rows in view over the whole ring, and a sort orders the visible indices by a typed key (cached, rebuilt at most every 500 ms while packets arrive).
-    - Full-area statistics views (top talkers, protocol distribution, flows, timeline, follow-stream, bookmarks) read a cache rebuilt at most every 500 ms.
+    - The statistics tabs (Flows, Stats, Alerts) read a cache rebuilt at most every 500 ms (top talkers, flows, timeline, bookmarks, and threat rows at or above the output level); the Stream tab shows the stream built when `f` was pressed.
     - Input modes: `Normal`, `FilterInput`, `Search`, and `ColumnConfig`; `LIVE` pins the view to the newest packet and manual navigation switches to `BROWSE`.
 4. **Inspector TUI**
     - Five tabs (Connections, Processes, Domains, Alerts, History); each tab is a table card over a detail card in one reorderable group.
@@ -242,7 +248,7 @@ pcap interface
     - Config file: `config.toml` in that folder (read only, the program never writes it).
     - Daemon state: `network-monitor.sock`, `network-monitor.db`, `network-monitor.pid`, and `monitor.log` in that folder, or in the directory given with `--state-dir`.
     - Saved capture log: `network-monitor-<YYYYMMDD-HHMMSS>.log` in that folder, written on a background thread by `tui::capture_io::write_log_in` (key `w`); as root, a symbolic link owned by another user anywhere on the path is refused, and without a home directory the export fails with an error toast.
-    - TUI state: `tui.toml` in that folder, shared by both TUIs (`tui::layout_store`): `version`, `language`, card orders, split ratios, and column widths, keyed by stable group and card names. Saves go to the state writer thread (`tui::state_writer`): the UI thread builds the whole file text on a commit event and queues it, a burst for one path is coalesced to the newest text, a failed write returns as a typed message and an error toast, and the exit path waits at most 5 seconds for the thread and prints one stderr warning when the last write failed or is still running. The write is atomic (a temporary file created exclusively in the target folder, synced, then renamed) and only on commit events; a symbolic link chain (at most 16 links, `tui::link_guard`) is followed first so the links survive, and a process with effective user ID 0 refuses a link owned by another user. An unreadable or other-version file is copied to `tui.toml.bak` before the first overwrite, `tui.toml.<pid>.tmp` files at least 60 seconds old are removed at start (a younger one may be another instance mid-save), invalid entries are skipped, and column widths are capped at 512. The tests inject the path, the clock, and the owner lookup.
+    - TUI state: `tui.toml` in that folder, shared by both TUIs (`tui::layout_store`): `version`, `language`, `output_level` (written only after a choice), `capture_tab_order` (written only when it differs from the default order, restored only as a full permutation), card orders, split ratios, and column widths, keyed by stable group and card names. Saves go to the state writer thread (`tui::state_writer`): the UI thread builds the whole file text on a commit event and queues it, a burst for one path is coalesced to the newest text, a failed write returns as a typed message and an error toast, and the exit path waits at most 5 seconds for the thread and prints one stderr warning when the last write failed or is still running. The write is atomic (a temporary file created exclusively in the target folder, synced, then renamed) and only on commit events; a symbolic link chain (at most 16 links, `tui::link_guard`) is followed first so the links survive, and a process with effective user ID 0 refuses a link owned by another user. An unreadable or other-version file is copied to `tui.toml.bak` before the first overwrite, `tui.toml.<pid>.tmp` files at least 60 seconds old are removed at start (a younger one may be another instance mid-save), invalid entries are skipped, and column widths are capped at 512. The tests inject the path, the clock, and the owner lookup.
 
 ---
 
@@ -289,5 +295,5 @@ cargo build --workspace
 ```
 
 2. **Coverage**
-    - The core crate carries unit tests for the decoders, flow tracker, filter, ring, writers, alert engine, and IPC; the binary crate carries `TestBackend` buffer tests of every view in English and Korean at 60x16, 100x30, and 130x40 (exact cells for focus, scrollbar, selection band, toast, and chips; hit areas through real mouse events), clock-injected tests for long press, drag, and lost release, unit tests for the sort cycle, column resolver, split ratios, the state store, the state writer (coalescing, bounded join), and the link guard (chains, loops, root refusal), buffer tests for the glyph budget and for double lines appearing only in overlays, plus config tests (injected home directory and `docs/config.example.toml` parsing).
+    - The core crate carries unit tests for the decoders, flow tracker, filter, ring, writers, alert engine, recon tracker (including the `RARE-DEST` de-duplication), and IPC; the binary crate carries `TestBackend` buffer tests of every view in English and Korean at 60x16, 100x30, and 130x40 (exact cells for focus, scrollbar, selection band, toast, and chips; hit areas through real mouse events), clock-injected tests for long press, drag, and lost release, unit tests for the sort cycle, column resolver, split ratios, the state store, the state writer (coalescing, bounded join), and the link guard (chains, loops, root refusal), buffer tests for the glyph budget and for double lines appearing only in overlays, tab tests (a render matrix of the six tabs in both languages, number, arrow, and click switching, tab drag and `<` / `>` reordering with `Esc` restore), output level tests (the `level_of` mapping, the `passes` filter, `tui.toml` round trips of `output_level` and `capture_tab_order`), plus config tests (injected home directory, `display.output_level` parsing, and `docs/config.example.toml` parsing).
     - The `monitor`, `ipc`, and `inspector` modules compile and run on Unix targets only; `notify` compiles everywhere but sends OS notifications on macOS and Linux only.

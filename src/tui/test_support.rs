@@ -9,6 +9,7 @@ use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
 use ratatui::text::Span;
 
+use network_monitor_core::analysis::{ThreatAnnotation, ThreatKind};
 use network_monitor_core::capture::{Linktype, RawPacket};
 use network_monitor_core::decode::{DecodedPacket, decode_packet};
 
@@ -58,6 +59,24 @@ pub fn tcp_packet(
         data,
         linktype: Linktype::Ethernet,
     })
+}
+
+// A TCP packet to an uncommon port carrying a threat annotation of `kind`.
+pub fn threat_packet(number: u64, kind: ThreatKind) -> DecodedPacket {
+    let mut packet = tcp_packet(
+        number,
+        [10, 0, 0, 1],
+        40000,
+        [93, 184, 216, 9],
+        4444,
+        60,
+        b"",
+    );
+    packet.threat = Some(ThreatAnnotation {
+        kind,
+        detail: "test".to_string(),
+    });
+    packet
 }
 
 // 2. apps and keys ------------------------------------------------------------
