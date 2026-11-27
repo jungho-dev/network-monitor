@@ -46,7 +46,7 @@ resolver = "3"
 members = ["crates/network-monitor-core"]
 
 [workspace.package]
-version = "0.1.3"
+version = "0.1.4"
 edition = "2024"
 rust-version = "1.88"
 license = "Apache-2.0"
@@ -79,7 +79,7 @@ libc.workspace = true
 tempfile.workspace = true
 
 [workspace.dependencies]
-network-monitor-core = { path = "crates/network-monitor-core", version = "0.1.2" }
+network-monitor-core = { path = "crates/network-monitor-core", version = "0.1.4" }
 pcap = "2.4.0"
 ratatui = "0.30.2"
 crossterm = "0.29.0"
